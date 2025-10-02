@@ -1,0 +1,13 @@
+﻿{
+  "name": "im-application-central-repo",
+  "version": "1.0.0",
+  "description": "Central Repo NPM Package Management",
+  "scripts": {
+    "im-install": "powershell -ExecutionPolicy Bypass -File ./scripts/im-install.ps1",
+    "im-uninstall": "powershell -ExecutionPolicy Bypass -File ./scripts/im-install.ps1 -Uninstall"
+  },
+  "dependencies": {},
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}

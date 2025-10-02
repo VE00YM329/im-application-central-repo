@@ -1,0 +1,366 @@
+name: Publish to GitHub Packages with Caching
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: 'NPM package name to mirror (e.g., "axios" or "@scope/pkg")'
+        required: true
+      package_version:
+        description: 'Package version to mirror (e.g., "latest" or a specific version)'
+        required: true
+        default: 'latest'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # Permission to publish to GitHub Packages
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@${{ github.repository_owner }}'
+
+      - name: Sanitize Package Name
+        id: sanitize_name
+        run: |
+          # This step removes the version from the package name if the user accidentally includes it.
+          # It correctly handles both regular and scoped packages 
+          SANITIZED_NAME=$(echo "${{ github.event.inputs.package_name }}" | sed 's/@\([^@]*\)$//')
+          echo "Original package name input: ${{ github.event.inputs.package_name }}, Version: ${{ github.event.inputs.package_version }}"
+          echo "Sanitized package name: $SANITIZED_NAME"
+          echo "sanitized_name=$SANITIZED_NAME" >> $GITHUB_OUTPUT
+
+      - name: Resolve package version
+        id: resolve_version
+        run: |
+          if [ "${{ github.event.inputs.package_version }}" = "latest" ]; then
+            # Get the actual latest version number using the sanitized package name
+            ACTUAL_VERSION=$(npm view ${{ steps.sanitize_name.outputs.sanitized_name }} version --registry=https://registry.npmjs.org/)
+            echo "resolved_version=$ACTUAL_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "resolved_version=${{ github.event.inputs.package_version }}" >> $GITHUB_OUTPUT
+          fi
+          echo "Resolved version: $(echo $ACTUAL_VERSION)"
+
+      - name: Cache NPM Package and Dependencies
+        id: cache_package
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./cached-packages
+            ./dependency-cache
+          key: npm-package-with-deps-${{ steps.sanitize_name.outputs.sanitized_name }}-${{ steps.resolve_version.outputs.resolved_version }}
+          restore-keys: |
+            npm-package-with-deps-${{ steps.sanitize_name.outputs.sanitized_name }}-
+
+      - name: Download Package and All Dependencies from NPM
+        if: steps.cache_package.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache miss - downloading package and all dependencies from NPM registry"
+          mkdir -p cached-packages dependency-cache temp-workspace
+          
+          # Create a temporary package.json to install the target package and get all dependencies
+          cd temp-workspace
+          cat > package.json << EOF
+          {
+            "name": "temp-installer",
+            "version": "1.0.0",
+            "dependencies": {
+              "${{ steps.sanitize_name.outputs.sanitized_name }}": "${{ steps.resolve_version.outputs.resolved_version }}"
+            }
+          }
+          EOF
+          
+          # Install the package and all its dependencies
+          echo "Installing ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} and all dependencies..."
+          npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
+          
+          # Create dependency list
+          echo "Generating dependency list..."
+          npm list --json --all > ../dependency-cache/dependency-tree.json
+          
+          # Extract all packages from node_modules and pack them
+          echo "Packing all dependencies..."
+          WORKSPACE_ROOT=$(pwd)
+          cd node_modules
+          
+          # Use a different approach to avoid subshell issues with while loop
+          find . -name "package.json" -type f > ../dependency-cache/package-list.txt
+          
+          while IFS= read -r pkg_json; do
+            pkg_dir=$(dirname "$pkg_json")
+            original_dir=$(pwd)
+            cd "$pkg_dir"
+            
+            # Get package info
+            pkg_name=$(node -p "require('./package.json').name" 2>/dev/null) || continue
+            pkg_version=$(node -p "require('./package.json').version" 2>/dev/null) || continue
+            
+            # Skip the main package - we handle it separately
+            if [ "$pkg_name" = "${{ steps.sanitize_name.outputs.sanitized_name }}" ]; then
+              echo "Skipping main package: $pkg_name@$pkg_version (handled separately)"
+              cd "$original_dir"
+              continue
+            fi
+            
+            echo "Processing dependency: $pkg_name@$pkg_version"
+            
+            # Create safe filename for caching
+            safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
+            
+            # Pack the package
+            if npm pack --quiet 2>/dev/null; then
+              # Move the packed file to our cache using absolute path
+              tgz_file=$(ls *.tgz 2>/dev/null | head -1)
+              if [ -n "$tgz_file" ]; then
+                mv "$tgz_file" "${WORKSPACE_ROOT}/../dependency-cache/${safe_name}-${pkg_version}.tgz"
+                echo "Cached: ${safe_name}-${pkg_version}.tgz"
+              fi
+            else
+              echo "Failed to pack: $pkg_name@$pkg_version"
+            fi
+            
+            cd "$original_dir"
+          done < ../dependency-cache/package-list.txt
+          
+          # Also handle the main package separately for publishing
+          cd "${WORKSPACE_ROOT}/../cached-packages"
+          npm pack ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} --registry=https://registry.npmjs.org/
+          
+          # Extract and modify the main package
+          tar -xzf ${{ steps.sanitize_name.outputs.sanitized_name }}-${{ steps.resolve_version.outputs.resolved_version }}.tgz
+          cd package
+          cp package.json package.json.backup
+          
+          # Update package.json with scoped name and publishConfig
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const originalName = pkg.name;
+            pkg.name = '@${{ github.repository_owner }}/' + '${{ steps.sanitize_name.outputs.sanitized_name }}'.split('/').pop();
+            pkg.publishConfig = { registry: 'https://npm.pkg.github.com' };
+            if (!pkg.repository) {
+              pkg.repository = {
+                type: 'git',
+                url: 'git+https://github.com/${{ github.repository }}.git'
+              };
+            }
+            if (pkg.scripts) {
+              const scriptsToRemove = ['test', 'prepublishOnly', 'prepack', 'postpack', 'prepare'];
+              scriptsToRemove.forEach(script => {
+                if (pkg.scripts[script]) {
+                  console.log('Removing script:', script);
+                  delete pkg.scripts[script];
+                }
+              });
+              Object.keys(pkg.scripts).forEach(scriptName => {
+                if (scriptName.includes('test') || scriptName.includes('build')) {
+                  console.log('Removing potentially problematic script:', scriptName);
+                  delete pkg.scripts[scriptName];
+                }
+              });
+            }
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+            console.log('Updated package name from', originalName, 'to', pkg.name);
+          "
+          
+          cd ../../
+          echo "Package and all dependencies downloaded, modified, and cached"
+          echo "Cached packages count: $(ls -1 dependency-cache/*.tgz 2>/dev/null | wc -l)"
+
+      - name: Use Cached Package and Dependencies
+        if: steps.cache_package.outputs.cache-hit == 'true'
+        run: |
+          echo "Cache hit - using cached package and dependencies"
+          echo "Cached packages count: $(ls -1 dependency-cache/*.tgz 2>/dev/null | wc -l)"
+          ls -la cached-packages/ dependency-cache/ | head -20
+
+      - name: Check if package already exists in GitHub Packages
+        id: check_github_package
+        run: |
+          # Use the sanitized name to check if the package exists
+          if npm view @${{ github.repository_owner }}/${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} version > /dev/null 2>&1; then
+            echo "Package already exists in GitHub Packages. Skipping publish."
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Package not found in GitHub Packages. Proceeding to publish."
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Full Dependency Graph (Rescoped)
+        run: |
+          echo "Publishing full dependency graph with rescoped names..."
+
+          MAIN_ORIG_NAME=${{ steps.sanitize_name.outputs.sanitized_name }}
+          MAIN_VERSION=${{ steps.resolve_version.outputs.resolved_version }}
+
+          # Collect all tarballs (dependencies + main)
+          if [ ! -d dependency-cache ]; then
+            echo "No dependency-cache directory found. Aborting publish graph step."; exit 1; fi
+          if ls dependency-cache/*.tgz 1>/dev/null 2>&1; then
+            echo "Dependency tgz files present."; else echo "No dependency tgz files found."; fi
+
+          # Ensure main package tarball exists (from cached-packages step)
+          if ls cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz 1>/dev/null 2>&1; then
+            cp cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz dependency-cache/ 2>/dev/null || true
+          fi
+
+          cd dependency-cache
+
+          # Create publisher script with two-pass strategy: map + rewrite + publish
+          cat > publish_graph.js << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          const { execSync } = require('child_process');
+
+          const owner = process.env.GH_OWNER;
+          if (!owner) { console.error('GH_OWNER env missing'); process.exit(1); }
+          const token = process.env.NODE_AUTH_TOKEN || '';
+
+          const registry = 'https://npm.pkg.github.com';
+          const tgzFiles = fs.readdirSync('.').filter(f => f.endsWith('.tgz'));
+          if (!tgzFiles.length) { console.log('No tgz files found'); process.exit(0); }
+          console.log('Found tarballs:', tgzFiles.length);
+
+          const extractRoot = '.extract';
+          if (!fs.existsSync(extractRoot)) fs.mkdirSync(extractRoot);
+
+          // First pass: extract metadata & build name mapping
+          const map = {}; // originalName -> scopedName
+          const pkgMeta = {}; // originalName -> { version, dir }
+
+          for (const file of tgzFiles) {
+            const base = file.replace(/\.tgz$/, '');
+            const outDir = path.join(extractRoot, base);
+            if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+            try {
+              execSync(`tar -xzf ${file} -C ${outDir}`);
+              const pkgPath = path.join(outDir, 'package', 'package.json');
+              if (!fs.existsSync(pkgPath)) { console.warn('Missing package.json in', file); continue; }
+              const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+              const orig = pkg.name;
+              const scoped = `@${owner}/` + orig.split('/').pop();
+              map[orig] = scoped;
+              pkgMeta[orig] = { version: pkg.version, dir: path.dirname(pkgPath) };
+            } catch (e) {
+              console.error('Failed to extract/read', file, e.message);
+            }
+          }
+
+          fs.writeFileSync('scoped-map.json', JSON.stringify(map, null, 2));
+          console.log('Built mapping for', Object.keys(map).length, 'packages');
+
+          // Helper to rewrite dependency object using map
+          function rewriteDeps(obj) {
+            if (!obj) return obj;
+            const out = {};
+            for (const [name, range] of Object.entries(obj)) {
+              if (map[name]) out[map[name]] = range; else out[name] = range;
+            }
+            return out;
+          }
+
+          // Second pass: rewrite & publish
+          let published = 0, skipped = 0, errors = 0;
+          for (const [orig, meta] of Object.entries(pkgMeta)) {
+            const pkgJsonPath = path.join(meta.dir, 'package.json');
+            const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+            const newName = map[orig];
+
+            // Skip if already scoped correctly
+            if (pkg.name === newName) {
+              console.log('Already scoped, continuing:', newName);
+            } else {
+              pkg.name = newName;
+            }
+            pkg.publishConfig = { registry };
+
+            // Rewrite dependency graphs
+            pkg.dependencies = rewriteDeps(pkg.dependencies);
+            pkg.devDependencies = rewriteDeps(pkg.devDependencies);
+            pkg.peerDependencies = rewriteDeps(pkg.peerDependencies);
+            pkg.optionalDependencies = rewriteDeps(pkg.optionalDependencies);
+
+            // Clean scripts that may run (safety).
+            if (pkg.scripts) {
+              for (const k of Object.keys(pkg.scripts)) {
+                if (/pre|post|install|test|build/i.test(k)) delete pkg.scripts[k];
+              }
+            }
+
+            if (!pkg.repository) {
+              pkg.repository = { type: 'git', url: `git+https://github.com/${process.env.GITHUB_REPOSITORY}.git` };
+            }
+
+            fs.writeFileSync(pkgJsonPath, JSON.stringify(pkg, null, 2));
+
+            // Check existence before publish
+            const id = `${pkg.name}@${pkg.version}`;
+            try {
+              execSync(`npm view ${pkg.name}@${pkg.version} version --registry=${registry}`, { stdio: 'pipe', env: { ...process.env, NODE_AUTH_TOKEN: token } });
+              console.log('Exists, skipping:', id);
+              skipped++;
+              continue;
+            } catch { /* not found */ }
+
+            try {
+              execSync('npm publish --ignore-scripts --registry=' + registry, { cwd: meta.dir, stdio: 'inherit', env: { ...process.env, NODE_AUTH_TOKEN: token } });
+              console.log('Published:', id);
+              published++;
+            } catch (e) {
+              console.error('Publish failed for', id, e.message);
+              errors++;
+            }
+          }
+
+          console.log('\nSummary');
+            console.log('Published:', published);
+          console.log('Skipped:', skipped);
+          console.log('Errors:', errors);
+          if (!published && errors) process.exitCode = 1;
+          EOF
+
+          GH_OWNER=${{ github.repository_owner }} GH_REPO=${{ github.repository }} \
+            GH_MAIN=${{ steps.sanitize_name.outputs.sanitized_name }} \
+            node publish_graph.js
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_OWNER: ${{ github.repository_owner }}
+
+      - name: Log Package Skipped
+        if: steps.check_github_package.outputs.exists == 'true'
+        run: |
+          # Use the sanitized name in the log message
+          echo "Skipping main package publish: @${{ github.repository_owner }}/${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} already exists in GitHub Packages."
+          echo "Dependencies will still be processed and published if they don't exist."
+
+      - name: Log Cache Status
+        run: |
+          if [ "${{ steps.cache_package.outputs.cache-hit }}" = "true" ]; then
+            echo "Used cached package and dependencies from previous workflow run"
+          else
+            echo "Downloaded fresh package and all dependencies from NPM registry and cached for future runs"
+          fi
+          
+          # Show summary of what was cached/processed
+          echo "Summary of cached dependencies:"
+          if [ -d "dependency-cache" ]; then
+            dep_count=$(ls -1 dependency-cache/*.tgz 2>/dev/null | wc -l)
+            echo "Total dependency packages cached: $dep_count"
+            echo "Cached dependencies (first 10):"
+            ls -1 dependency-cache/*.tgz 2>/dev/null | head -10 | sed 's/.*\//- /'
+            if [ "$dep_count" -gt 10 ]; then
+              echo "... and $((dep_count - 10)) more"
+            fi
+          else
+            echo "No dependency cache directory found"
+          fi
