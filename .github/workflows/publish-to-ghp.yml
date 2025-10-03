@@ -83,7 +83,7 @@ jobs:
           npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
           
           # Create dependency list
-          mkdir -p ../dependency-cache
+          mkdir -p dependency-cache
           echo "Generating dependency list..."
           npm list --json --all > ../dependency-cache/dependency-tree.json
           
