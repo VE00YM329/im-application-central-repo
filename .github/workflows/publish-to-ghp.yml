@@ -83,8 +83,9 @@ jobs:
           npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
           
           # Create dependency list
+          mkdir -p ../dependency-cache
           echo "Generating dependency list..."
-          npm list --json --all > ../../dependency-cache/dependency-tree.json
+          npm list --json --all > ../dependency-cache/dependency-tree.json
           
           # Extract all packages from node_modules and pack them
           echo "Packing all dependencies..."
@@ -92,7 +93,7 @@ jobs:
           cd node_modules
           
           # Use a different approach to avoid subshell issues with while loop
-          find . -name "package.json" -type f > ../../dependency-cache/package-list.txt
+          find . -name "package.json" -type f > ../dependency-cache/package-list.txt
           
           while IFS= read -r pkg_json; do
             pkg_dir=$(dirname "$pkg_json")
