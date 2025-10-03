@@ -695,6 +695,7 @@ function Process-Package {
         Write-Error "LICENSE VIOLATION: One or more dependencies of $PackageName@$ConcreteVersion have unapproved licenses. Halting installation."
         return $false
     }
+    Write-Host "[LICENSE] All licenses for $PackageName@$ConcreteVersion and its dependencies are approved." -ForegroundColor Green
 
     # Check Node.js compatibility before proceeding
     $isCompatible = Check-NodeCompatibility -PackageName $PackageName -PackageVersion $ConcreteVersion
