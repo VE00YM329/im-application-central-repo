@@ -203,6 +203,13 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
 
+      - name: Test GitHub Packages access
+        run: |
+          npm whoami --registry=https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+
+
       - name: Publish Full Dependency Graph (ReScoped)
         if: steps.check_github_package.outputs.exists == 'false'
         run: |
