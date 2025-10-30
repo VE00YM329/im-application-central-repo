@@ -227,7 +227,7 @@ jobs:
           # Create publisher script with two-pass strategy: map + rewrite + publish
           cat > publish_graph.js << 'EOF'
           const fs = require('fs');
-          const path = require('path');
+            const path = require('path');
             const { execSync } = require('child_process');
             
             const owner = process.env.GH_OWNER;
@@ -239,6 +239,10 @@ jobs:
             const token = process.env.NODE_AUTH_TOKEN || '';
             const registry = 'https://npm.pkg.github.com';
             
+            // Get target versions from environment if specified
+            const targetMain = process.env.GH_MAIN || '';
+            const targetVersion = process.env.MAIN_VERSION || '';
+            
             const tgzFiles = fs.readdirSync('.').filter(f => f.endsWith('.tgz'));
             if (!tgzFiles.length) {
               console.log('No tgz files found');
@@ -246,13 +250,17 @@ jobs:
             }
             
             console.log('Found tarballs:', tgzFiles.length);
+            if (targetMain && targetVersion) {
+              console.log(`Target: ${targetMain}@${targetVersion}`);
+            }
             
             const extractRoot = '.extract';
             if (!fs.existsSync(extractRoot)) fs.mkdirSync(extractRoot);
             
             // First pass: extract metadata & build name mapping
-            const map = {}; // originalName -> scopedName
-            const pkgMeta = {}; // originalName -> { version, dir }
+            // Use compound key: "name@version" to handle multiple versions
+            const map = {}; // "originalName@version" -> scopedName
+            const pkgMeta = {}; // "originalName@version" -> { name, version, scopedName, dir }
             
             for (const file of tgzFiles) {
               const base = file.replace(/\.tgz$/, '');
@@ -268,16 +276,26 @@ jobs:
                 }
             
                 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-                const orig = pkg.name;
-                const scoped = `@${owner}/` + orig.split('/').pop();
+                const origName = pkg.name;
+                const origVersion = pkg.version;
+                const key = `${origName}@${origVersion}`;
+                const scopedName = `@${owner}/` + origName.split('/').pop();
                 
-                map[orig] = scoped;
-                pkgMeta[orig] = { 
-                  version: pkg.version,  // Preserve original version
+                // If we have a target main package and version, skip other versions of that package
+                if (targetMain && targetVersion && origName === targetMain && origVersion !== targetVersion) {
+                  console.log(`Skipping ${key} (target is ${targetMain}@${targetVersion})`);
+                  continue;
+                }
+                
+                map[key] = scopedName;
+                pkgMeta[key] = { 
+                  name: origName,
+                  version: origVersion,
+                  scopedName: scopedName,
                   dir: path.dirname(pkgPath) 
                 };
                 
-                console.log(`Mapped: ${orig}@${pkg.version} -> ${scoped}@${pkg.version}`);
+                console.log(`Mapped: ${key} -> ${scopedName}@${origVersion}`);
               } catch (e) {
                 console.error('Failed to extract/read', file, e.message);
               }
@@ -287,12 +305,25 @@ jobs:
             console.log('Built mapping for', Object.keys(map).length, 'packages');
             
             // Helper to rewrite dependency object using map
+            // For dependencies, we try to match by name only (any version)
             function rewriteDeps(obj) {
               if (!obj) return obj;
               const out = {};
               for (const [name, range] of Object.entries(obj)) {
-                if (map[name]) out[map[name]] = range;
-                else out[name] = range;
+                // Try to find matching scoped name from any version
+                let scopedName = null;
+                for (const [key, scoped] of Object.entries(map)) {
+                  const pkgName = key.split('@')[0];
+                  if (pkgName === name) {
+                    scopedName = scoped;
+                    break;
+                  }
+                }
+                if (scopedName) {
+                  out[scopedName] = range;
+                } else {
+                  out[name] = range;
+                }
               }
               return out;
             }
@@ -300,23 +331,22 @@ jobs:
             // Second pass: rewrite & publish
             let published = 0, skipped = 0, errors = 0;
             
-            for (const [orig, meta] of Object.entries(pkgMeta)) {
+            for (const [key, meta] of Object.entries(pkgMeta)) {
               const pkgJsonPath = path.join(meta.dir, 'package.json');
               const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
               
-              const newName = map[orig];
-              const originalVersion = meta.version; // Use the version captured during extraction
+              const newName = meta.scopedName;
+              const originalVersion = meta.version;
               
               // CRITICAL: Ensure version is not modified
               if (pkg.version !== originalVersion) {
-                console.warn(`Version mismatch detected for ${orig}: package.json has ${pkg.version}, expected ${originalVersion}`);
-                pkg.version = originalVersion; // Force correct version
+                console.warn(`Version mismatch detected for ${key}: package.json has ${pkg.version}, expected ${originalVersion}`);
+                pkg.version = originalVersion;
               }
               
-              // Skip if already scoped correctly
-              if (pkg.name === newName) {
-                console.log('Already scoped, continuing:', newName);
-              } else {
+              // Update name
+              if (pkg.name !== newName) {
+                console.log(`Renaming: ${pkg.name} -> ${newName}`);
                 pkg.name = newName;
               }
             
@@ -380,7 +410,7 @@ jobs:
                   env: { 
                     ...process.env, 
                     NODE_AUTH_TOKEN: token,
-                    npm_config_cache: path.join(process.cwd(), '.npm-cache') // Isolated cache
+                    npm_config_cache: path.join(process.cwd(), '.npm-cache')
                   },
                   timeout: 120000
                 });
