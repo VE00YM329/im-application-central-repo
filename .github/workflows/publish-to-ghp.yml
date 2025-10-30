@@ -266,8 +266,10 @@ jobs:
                 env: { ...process.env, NODE_AUTH_TOKEN: token},
                 timeout: 10000
               });
+              console.log('true');
               return true;
             } catch (e) {
+              console.log(`Error: ${e.message}`);
               return false;
             }
           }
