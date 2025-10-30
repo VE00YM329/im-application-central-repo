@@ -32,7 +32,7 @@ jobs:
         run: |
           # This step removes the version from the package name if the user accidentally includes it.
           # It correctly handles both regular and scoped packages 
-          SANITIZED_NAME=$(echo "${{ github.event.inputs.package_name }}" | sed 's/@[0-9][^@]*$//')
+          SANITIZED_NAME=$(echo "${{ github.event.inputs.package_name }}" | sed 's/@\([^@]*\)$//')
           echo "Original package name input: ${{ github.event.inputs.package_name }}, Version: ${{ github.event.inputs.package_version }}"
           echo "Sanitized package name: $SANITIZED_NAME"
           echo "sanitized_name=$SANITIZED_NAME" >> $GITHUB_OUTPUT
@@ -83,6 +83,7 @@ jobs:
           npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
           
           # Create dependency list
+          mkdir -p ../dependency-cache
           mkdir -p dependency-cache
           echo "Generating dependency list..."
           npm list --json --all > ../dependency-cache/dependency-tree.json
@@ -186,14 +187,8 @@ jobs:
       - name: Check if package already exists in GitHub Packages
         id: check_github_package
         run: |
-          # Extract the base package name (remove scope if present) for the scoped package check
-          BASE_NAME=$(echo "${{ steps.sanitize_name.outputs.sanitized_name }}" | sed 's|.*/||')
-          SCOPED_PACKAGE_NAME="@${{ github.repository_owner }}/${BASE_NAME}"
-          
-          echo "Checking if package ${SCOPED_PACKAGE_NAME}@${{ steps.resolve_version.outputs.resolved_version }} exists..."
-          
-          # Use the scoped name to check if the package exists in GitHub Packages
-          if npm view "${SCOPED_PACKAGE_NAME}@${{ steps.resolve_version.outputs.resolved_version }}" version --registry=https://npm.pkg.github.com > /dev/null 2>&1; then
+          # Use the sanitized name to check if the package exists
+          if npm view @${{ github.repository_owner }}/${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} version > /dev/null 2>&1; then
             echo "Package already exists in GitHub Packages. Skipping publish."
             echo "exists=true" >> $GITHUB_OUTPUT
           else
@@ -203,10 +198,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish Full Dependency Graph (ReScoped)
-        if: steps.check_github_package.outputs.exists == 'false'
+      - name: Publish Full Dependency Graph (Rescoped)
         run: |
-          echo "Publishing full dependency graph with ReScoped names..."
+          echo "Publishing full dependency graph with rescoped names..."
 
           MAIN_ORIG_NAME=${{ steps.sanitize_name.outputs.sanitized_name }}
           MAIN_VERSION=${{ steps.resolve_version.outputs.resolved_version }}
@@ -314,57 +308,27 @@ jobs:
             // Check existence before publish
             const id = `${pkg.name}@${pkg.version}`;
             try {
-              // Use a more robust existence check with better error handling
-              const checkCmd = `npm view "${pkg.name}@${pkg.version}" version --registry=${registry}`;
-              execSync(checkCmd, { 
-                stdio: 'pipe', 
-                env: { ...process.env, NODE_AUTH_TOKEN: token },
-                timeout: 30000 // 30 second timeout
-              });
+              execSync(`npm view ${pkg.name}@${pkg.version} version --registry=${registry}`, { stdio: 'pipe', env: { ...process.env, NODE_AUTH_TOKEN: token } });
               console.log('Exists, skipping:', id);
               skipped++;
               continue;
-            } catch (checkError) { 
-              // Package not found, proceed with publish
-              console.log('Package not found, will publish:', id);
-            }
+            } catch { /* not found */ }
 
             try {
-              // Use more robust publish command with better error handling
-              const publishCmd = `npm publish --ignore-scripts --registry=${registry}`;
-              execSync(publishCmd, { 
-                cwd: meta.dir, 
-                stdio: 'inherit', 
-                env: { ...process.env, NODE_AUTH_TOKEN: token },
-                timeout: 120000 // 2 minute timeout for publish
-              });
-              console.log('Successfully published:', id);
+              execSync('npm publish --ignore-scripts --registry=' + registry, { cwd: meta.dir, stdio: 'inherit', env: { ...process.env, NODE_AUTH_TOKEN: token } });
+              console.log('Published:', id);
               published++;
-            } catch (publishError) {
-              // Check if the error is due to package already existing
-              if (publishError.message && publishError.message.includes('409') && publishError.message.includes('Cannot publish over existing version')) {
-                console.log('Package already exists (409 conflict), skipping:', id);
-                skipped++;
-              } else {
-                console.error('Publish failed for', id, '- Error:', publishError.message);
-                errors++;
-              }
+            } catch (e) {
+              console.error('Publish failed for', id, e.message);
+              errors++;
             }
           }
 
           console.log('\nSummary');
-          console.log('Published:', published);
+            console.log('Published:', published);
           console.log('Skipped:', skipped);
           console.log('Errors:', errors);
-          // Only exit with error if there were actual errors, not if packages were skipped
-          if (errors > 0) {
-            console.log('Some packages failed to publish due to errors');
-            process.exitCode = 1;
-          } else if (published === 0 && skipped > 0) {
-            console.log('All packages were already published (skipped)');
-          } else if (published > 0) {
-            console.log('Successfully published new packages');
-          }
+          if (!published && errors) process.exitCode = 1;
           EOF
 
           GH_OWNER=${{ github.repository_owner }} GH_REPO=${{ github.repository }} \
@@ -374,136 +338,11 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_OWNER: ${{ github.repository_owner }}
 
-      - name: Publish Dependencies Only (if main package exists)
-        if: steps.check_github_package.outputs.exists == 'true'
-        run: |
-          echo "Main package already exists. Publishing only dependencies that don't exist..."
-
-          if [ ! -d dependency-cache ]; then
-            echo "No dependency-cache directory found. Skipping dependencies."; exit 0; fi
-
-          cd dependency-cache
-
-          # Create a script to publish only dependencies (exclude main package)
-          cat > publish_deps_only.js << 'EOF'
-          const fs = require('fs');
-          const path = require('path');
-          const { execSync } = require('child_process');
-
-          const owner = process.env.GH_OWNER;
-          const mainPackage = process.env.GH_MAIN;
-          if (!owner) { console.error('GH_OWNER env missing'); process.exit(1); }
-          const token = process.env.NODE_AUTH_TOKEN || '';
-
-          const registry = 'https://npm.pkg.github.com';
-          const tgzFiles = fs.readdirSync('.').filter(f => f.endsWith('.tgz'));
-          if (!tgzFiles.length) { console.log('No tgz files found'); process.exit(0); }
-
-          const extractRoot = '.extract';
-          if (!fs.existsSync(extractRoot)) fs.mkdirSync(extractRoot);
-
-          let published = 0, skipped = 0, errors = 0;
-
-          for (const file of tgzFiles) {
-            const base = file.replace(/\.tgz$/, '');
-            const outDir = path.join(extractRoot, base);
-            if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-            
-            try {
-              execSync(`tar -xzf ${file} -C ${outDir}`);
-              const pkgPath = path.join(outDir, 'package', 'package.json');
-              if (!fs.existsSync(pkgPath)) { console.warn('Missing package.json in', file); continue; }
-              
-              const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-              const originalName = pkg.name;
-              
-              // Skip the main package
-              if (originalName === mainPackage) {
-                console.log('Skipping main package:', originalName);
-                continue;
-              }
-              
-              // Transform to scoped package
-              const scopedName = `@${owner}/` + originalName.split('/').pop();
-              pkg.name = scopedName;
-              pkg.publishConfig = { registry };
-              
-              // Clean potentially problematic scripts
-              if (pkg.scripts) {
-                for (const k of Object.keys(pkg.scripts)) {
-                  if (/pre|post|install|test|build/i.test(k)) delete pkg.scripts[k];
-                }
-              }
-              
-              if (!pkg.repository) {
-                pkg.repository = { type: 'git', url: `git+https://github.com/${process.env.GITHUB_REPOSITORY}.git` };
-              }
-              
-              const packageDir = path.dirname(pkgPath);
-              fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
-              
-              const id = `${pkg.name}@${pkg.version}`;
-              
-              // Check if package already exists
-              try {
-                const checkCmd = `npm view "${pkg.name}@${pkg.version}" version --registry=${registry}`;
-                execSync(checkCmd, { 
-                  stdio: 'pipe', 
-                  env: { ...process.env, NODE_AUTH_TOKEN: token },
-                  timeout: 30000
-                });
-                console.log('Dependency exists, skipping:', id);
-                skipped++;
-                continue;
-              } catch { 
-                console.log('Dependency not found, will publish:', id);
-              }
-              
-              // Publish the package
-              try {
-                const publishCmd = `npm publish --ignore-scripts --registry=${registry}`;
-                execSync(publishCmd, { 
-                  cwd: packageDir, 
-                  stdio: 'inherit', 
-                  env: { ...process.env, NODE_AUTH_TOKEN: token },
-                  timeout: 120000
-                });
-                console.log('Successfully published dependency:', id);
-                published++;
-              } catch (publishError) {
-                if (publishError.message && publishError.message.includes('409') && publishError.message.includes('Cannot publish over existing version')) {
-                  console.log('Dependency already exists (409 conflict), skipping:', id);
-                  skipped++;
-                } else {
-                  console.error('Failed to publish dependency', id, '- Error:', publishError.message);
-                  errors++;
-                }
-              }
-            } catch (e) {
-              console.error('Failed to process', file, '- Error:', e.message);
-              errors++;
-            }
-          }
-
-          console.log('\nDependencies Summary:');
-          console.log('Published:', published);
-          console.log('Skipped:', skipped);
-          console.log('Errors:', errors);
-          EOF
-
-          GH_OWNER=${{ github.repository_owner }} GH_MAIN=${{ steps.sanitize_name.outputs.sanitized_name }} \
-            node publish_deps_only.js
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_OWNER: ${{ github.repository_owner }}
-
       - name: Log Package Skipped
         if: steps.check_github_package.outputs.exists == 'true'
         run: |
-          # Use the correct scoped package name in the log message
-          BASE_NAME=$(echo "${{ steps.sanitize_name.outputs.sanitized_name }}" | sed 's|.*/||')
-          SCOPED_PACKAGE_NAME="@${{ github.repository_owner }}/${BASE_NAME}"
-          echo "Skipping main package publish: ${SCOPED_PACKAGE_NAME}@${{ steps.resolve_version.outputs.resolved_version }} already exists in GitHub Packages."
+          # Use the sanitized name in the log message
+          echo "Skipping main package publish: @${{ github.repository_owner }}/${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} already exists in GitHub Packages."
           echo "Dependencies will still be processed and published if they don't exist."
 
       - name: Log Cache Status
