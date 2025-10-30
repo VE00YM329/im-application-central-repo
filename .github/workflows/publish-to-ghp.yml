@@ -260,10 +260,10 @@ jobs:
               
               const scopedName = `@${owner}/` + name.split('/').pop();
               const checkCmd = `npm view "${scopedName}@${version}" version --registry=${registry}`;
-              console.log(`packageExists: ${checkCmd}`);
+              console.log(`packageExists: ${checkCmd}, token: ${token}, process: ${process.env}`);
               execSync(checkCmd, {
                 stdio: 'pipe',
-                env: { ...process.env, NODE_AUTH_TOKEN:  },
+                env: { ...process.env, NODE_AUTH_TOKEN: token},
                 timeout: 10000
               });
               return true;
@@ -463,7 +463,7 @@ jobs:
                 stdio: 'inherit',
                 env: { 
                   ...process.env, 
-                  NODE_AUTH_TOKEN: ,
+                  NODE_AUTH_TOKEN: token,
                   npm_config_cache: path.join(process.cwd(), '.npm-cache')
                 },
                 timeout: 120000
