@@ -259,7 +259,7 @@ jobs:
             try {
               
               const scopedName = `@${owner}/` + name.split('/').pop();
-              const checkCmd = `npm view "${scopedName}@${version}" version --registry=${registry}`;
+              const checkCmd = `npm config set //registry.npmjs.org/:_authToken "${token}"; npm view "${scopedName}@${version}" version --registry=${registry}`;
               console.log(`packageExists: ${checkCmd}, token: ${token}, process: ${process.env}`);
               execSync(checkCmd, {
                 stdio: 'pipe',
