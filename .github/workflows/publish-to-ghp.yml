@@ -257,11 +257,13 @@ jobs:
           // Helper function to check if package exists in registry
           function packageExists(name, version) {
             try {
+              
               const scopedName = `@${owner}/` + name.split('/').pop();
               const checkCmd = `npm view "${scopedName}@${version}" version --registry=${registry}`;
+              console.log(`packageExists: ${checkCmd}`);
               execSync(checkCmd, {
                 stdio: 'pipe',
-                env: { ...process.env, NODE_AUTH_TOKEN: token },
+                env: { ...process.env, NODE_AUTH_TOKEN:  },
                 timeout: 10000
               });
               return true;
@@ -301,17 +303,17 @@ jobs:
               
               // If we have a target main package and version, skip other versions of that package
               if (targetMain && targetVersion && origName === targetMain && origVersion !== targetVersion) {
-                console.log(`  ⊘ Skipping (target is ${targetMain}@${targetVersion})`);
+                console.log(`Skipping (target is ${targetMain}@${targetVersion})`);
                 continue;
               }
               
               // Check if already published
               if (packageExists(origName, origVersion)) {
-                console.log(`  ✓ Already published as ${scopedName}@${origVersion}, skipping`);
+                console.log(`Already published as ${scopedName}@${origVersion}, skipping`);
                 continue;
               }
               
-              console.log(`  → Will process ${scopedName}@${origVersion}`);
+              console.log(`Will process ${scopedName}@${origVersion}`);
               packagesToProcess.push({
                 file,
                 origName,
@@ -334,7 +336,7 @@ jobs:
           }
           
           if (packagesToProcess.length === 0) {
-            console.log('\n✓ All packages already published, nothing to do!');
+            console.log('\nAll packages already published, nothing to do!');
             process.exit(0);
           }
           
@@ -461,7 +463,7 @@ jobs:
                 stdio: 'inherit',
                 env: { 
                   ...process.env, 
-                  NODE_AUTH_TOKEN: token,
+                  NODE_AUTH_TOKEN: ,
                   npm_config_cache: path.join(process.cwd(), '.npm-cache')
                 },
                 timeout: 120000
@@ -520,7 +522,7 @@ jobs:
           const owner = process.env.GH_OWNER;
           const mainPackage = process.env.GH_MAIN;
           if (!owner) { console.error('GH_OWNER env missing'); process.exit(1); }
-          const token = process.env.NODE_AUTH_TOKEN || '';
+          const  = process.env.NODE_AUTH_TOKEN || '';
 
           const registry = 'https://npm.pkg.github.com';
           const tgzFiles = fs.readdirSync('.').filter(f => f.endsWith('.tgz'));
