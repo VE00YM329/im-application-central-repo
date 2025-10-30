@@ -254,38 +254,107 @@ jobs:
             console.log(`Target: ${targetMain}@${targetVersion}`);
           }
           
+          // Helper function to check if package exists in registry
+          function packageExists(name, version) {
+            try {
+              const scopedName = `@${owner}/` + name.split('/').pop();
+              const checkCmd = `npm view "${scopedName}@${version}" version --registry=${registry}`;
+              execSync(checkCmd, {
+                stdio: 'pipe',
+                env: { ...process.env, NODE_AUTH_TOKEN: token },
+                timeout: 10000
+              });
+              return true;
+            } catch (e) {
+              return false;
+            }
+          }
+          
           const extractRoot = '.extract';
           if (!fs.existsSync(extractRoot)) fs.mkdirSync(extractRoot);
           
-          // First pass: extract metadata & build name mapping
-          // Use compound key: "name@version" to handle multiple versions
-          const map = {}; // "originalName@version" -> scopedName
-          const pkgMeta = {}; // "originalName@version" -> { name, version, scopedName, dir }
+          // First pass: Quick scan to identify packages and check existence
+          console.log('\n=== Scanning tarballs ===');
+          const packagesToProcess = [];
           
           for (const file of tgzFiles) {
             const base = file.replace(/\.tgz$/, '');
-            const outDir = path.join(extractRoot, base);
-            if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-          
+            const tempDir = path.join(extractRoot, `temp_${base}`);
+            
             try {
-              execSync(`tar -xzf ${file} -C ${outDir}`);
-              const pkgPath = path.join(outDir, 'package', 'package.json');
+              // Quick extract just to read package.json
+              if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+              execSync(`tar -xzf ${file} -C ${tempDir} package/package.json`, { stdio: 'pipe' });
+              
+              const pkgPath = path.join(tempDir, 'package', 'package.json');
               if (!fs.existsSync(pkgPath)) {
-                console.warn('Missing package.json in', file);
+                console.warn(`Missing package.json in ${file}, skipping`);
                 continue;
               }
           
               const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
               const origName = pkg.name;
               const origVersion = pkg.version;
-              const key = `${origName}@${origVersion}`;
               const scopedName = `@${owner}/` + origName.split('/').pop();
+              
+              console.log(`Found: ${origName}@${origVersion}`);
               
               // If we have a target main package and version, skip other versions of that package
               if (targetMain && targetVersion && origName === targetMain && origVersion !== targetVersion) {
-                console.log(`Skipping ${key} (target is ${targetMain}@${targetVersion})`);
+                console.log(`  ⊘ Skipping (target is ${targetMain}@${targetVersion})`);
                 continue;
               }
+              
+              // Check if already published
+              if (packageExists(origName, origVersion)) {
+                console.log(`  ✓ Already published as ${scopedName}@${origVersion}, skipping`);
+                continue;
+              }
+              
+              console.log(`  → Will process ${scopedName}@${origVersion}`);
+              packagesToProcess.push({
+                file,
+                origName,
+                origVersion,
+                scopedName
+              });
+              
+            } catch (e) {
+              console.error(`Failed to scan ${file}:`, e.message);
+            } finally {
+              // Clean up temp directory
+              try {
+                if (fs.existsSync(tempDir)) {
+                  execSync(`rm -rf ${tempDir}`, { stdio: 'pipe' });
+                }
+              } catch (e) {
+                // Ignore cleanup errors
+              }
+            }
+          }
+          
+          if (packagesToProcess.length === 0) {
+            console.log('\n✓ All packages already published, nothing to do!');
+            process.exit(0);
+          }
+          
+          console.log(`\n=== Processing ${packagesToProcess.length} packages ===`);
+          
+          // Second pass: Extract and build metadata only for packages that need processing
+          const map = {}; // "originalName@version" -> scopedName
+          const pkgMeta = {}; // "originalName@version" -> { name, version, scopedName, dir }
+          
+          for (const pkgInfo of packagesToProcess) {
+            const { file, origName, origVersion, scopedName } = pkgInfo;
+            const base = file.replace(/\.tgz$/, '');
+            const outDir = path.join(extractRoot, base);
+            
+            try {
+              if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+              execSync(`tar -xzf ${file} -C ${outDir}`, { stdio: 'pipe' });
+              
+              const pkgPath = path.join(outDir, 'package', 'package.json');
+              const key = `${origName}@${origVersion}`;
               
               map[key] = scopedName;
               pkgMeta[key] = { 
@@ -295,17 +364,20 @@ jobs:
                 dir: path.dirname(pkgPath) 
               };
               
-              console.log(`Mapped: ${key} -> ${scopedName}@${origVersion}`);
+              console.log(`Extracted: ${key}`);
             } catch (e) {
-              console.error('Failed to extract/read', file, e.message);
+              console.error(`Failed to extract ${file}:`, e.message);
             }
           }
           
+          if (Object.keys(pkgMeta).length === 0) {
+            console.log('\nNo packages to publish after extraction');
+            process.exit(0);
+          }
+          
           fs.writeFileSync('scoped-map.json', JSON.stringify(map, null, 2));
-          console.log('Built mapping for', Object.keys(map).length, 'packages');
           
           // Helper to rewrite dependency object using map
-          // For dependencies, we try to match by name only (any version)
           function rewriteDeps(obj) {
             if (!obj) return obj;
             const out = {};
@@ -328,8 +400,9 @@ jobs:
             return out;
           }
           
-          // Second pass: rewrite & publish
-          let published = 0, skipped = 0, errors = 0;
+          // Third pass: Rewrite & publish
+          console.log('\n=== Publishing packages ===');
+          let published = 0, errors = 0;
           
           for (const [key, meta] of Object.entries(pkgMeta)) {
             const pkgJsonPath = path.join(meta.dir, 'package.json');
@@ -338,18 +411,14 @@ jobs:
             const newName = meta.scopedName;
             const originalVersion = meta.version;
             
-            // CRITICAL: Ensure version is not modified
+            // Ensure version is not modified
             if (pkg.version !== originalVersion) {
-              console.warn(`Version mismatch detected for ${key}: package.json has ${pkg.version}, expected ${originalVersion}`);
+              console.warn(`Version mismatch for ${key}: fixing ${pkg.version} -> ${originalVersion}`);
               pkg.version = originalVersion;
             }
             
             // Update name
-            if (pkg.name !== newName) {
-              console.log(`Renaming: ${pkg.name} -> ${newName}`);
-              pkg.name = newName;
-            }
-          
+            pkg.name = newName;
             pkg.publishConfig = { registry };
           
             // Rewrite dependency graphs
@@ -358,7 +427,7 @@ jobs:
             pkg.peerDependencies = rewriteDeps(pkg.peerDependencies);
             pkg.optionalDependencies = rewriteDeps(pkg.optionalDependencies);
           
-            // Clean scripts that may run (safety)
+            // Clean scripts (safety)
             if (pkg.scripts) {
               for (const k of Object.keys(pkg.scripts)) {
                 if (/pre|post|install|test|build/i.test(k)) delete pkg.scripts[k];
@@ -372,37 +441,20 @@ jobs:
               };
             }
           
-            // Write with explicit version verification
             fs.writeFileSync(pkgJsonPath, JSON.stringify(pkg, null, 2));
             
-            // Verify the written file has correct version
+            // Verify version
             const verifyPkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
             if (verifyPkg.version !== originalVersion) {
-              console.error(`CRITICAL: Version was changed after write! Expected ${originalVersion}, got ${verifyPkg.version}`);
+              console.error(`CRITICAL: Version changed after write for ${key}!`);
               errors++;
               continue;
             }
           
             const id = `${pkg.name}@${originalVersion}`;
-            console.log(`Processing: ${id}`);
+            console.log(`Publishing: ${id}`);
           
             try {
-              // Check existence with explicit version
-              const checkCmd = `npm view "${pkg.name}@${originalVersion}" version --registry=${registry}`;
-              execSync(checkCmd, {
-                stdio: 'pipe',
-                env: { ...process.env, NODE_AUTH_TOKEN: token },
-                timeout: 30000
-              });
-              console.log('Exists, skipping:', id);
-              skipped++;
-              continue;
-            } catch (checkError) {
-              console.log('Package not found, will publish:', id);
-            }
-          
-            try {
-              // Publish with explicit working directory and no cache
               const publishCmd = `npm publish --ignore-scripts --registry=${registry} --no-git-checks`;
               execSync(publishCmd, {
                 cwd: meta.dir,
@@ -414,33 +466,31 @@ jobs:
                 },
                 timeout: 120000
               });
-              console.log('Successfully published:', id);
+              console.log(`Published: ${id}`);
               published++;
             } catch (publishError) {
               if (publishError.message && 
                   (publishError.message.includes('409') || 
                    publishError.message.includes('Cannot publish over existing version'))) {
-                console.log('Package already exists (409 conflict), skipping:', id);
-                skipped++;
+                console.log(`Already exists (409): ${id}`);
               } else {
-                console.error('Publish failed for', id, '- Error:', publishError.message);
+                console.error(`Failed: ${id}`, publishError.message);
                 errors++;
               }
             }
           }
           
           console.log('\n=== Summary ===');
-          console.log('Published:', published);
-          console.log('Skipped:', skipped);
-          console.log('Errors:', errors);
+          console.log(`Published: ${published}`);
+          console.log(`Errors: ${errors}`);
           
           if (errors > 0) {
-            console.log('Some packages failed to publish due to errors');
+            console.log('Some packages failed to publish');
             process.exitCode = 1;
-          } else if (published === 0 && skipped > 0) {
-            console.log('All packages were already published (skipped)');
-          } else if (published > 0) {
-            console.log('Successfully published new packages');
+          } else if (published === 0) {
+            console.log('All packages were already published');
+          } else {
+            console.log(`Successfully published ${published} new package(s)`);
           }
           EOF
 
