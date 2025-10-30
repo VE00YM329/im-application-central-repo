@@ -499,7 +499,7 @@ jobs:
             GH_MAIN=${{ steps.sanitize_name.outputs.sanitized_name }} \
             node publish_graph.js
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GH_OWNER: ${{ github.repository_owner }}
 
       - name: Publish Dependencies Only (if main package exists)
@@ -622,7 +622,7 @@ jobs:
           GH_OWNER=${{ github.repository_owner }} GH_MAIN=${{ steps.sanitize_name.outputs.sanitized_name }} \
             node publish_deps_only.js
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GH_OWNER: ${{ github.repository_owner }}
 
       - name: Log Package Skipped
