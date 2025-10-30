@@ -201,7 +201,7 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
 
       - name: Publish Full Dependency Graph (ReScoped)
         if: steps.check_github_package.outputs.exists == 'false'
@@ -499,7 +499,7 @@ jobs:
             GH_MAIN=${{ steps.sanitize_name.outputs.sanitized_name }} \
             node publish_graph.js
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
           GH_OWNER: ${{ github.repository_owner }}
 
       - name: Publish Dependencies Only (if main package exists)
