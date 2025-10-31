@@ -263,8 +263,8 @@ jobs:
                 echo "//npm.pkg.github.com/:_authToken=${token}" > ~/.npmrc &&
                 npm view "${scopedName}@${version}" version --registry=${registry}
               `;
-              execSync(checkCmd, { stdio: 'pipe', shell: '/bin/bash', timeout: 10000 });
               console.log(`packageExists: ${checkCmd}, token: ${token.split('_')[0]}, token2: ${token.split('_')[1]}, process: ${process.env}`);
+              execSync(checkCmd, { stdio: 'pipe', shell: '/bin/bash', timeout: 10000 });
               console.log('true');
               return true;
             } catch (e) {
