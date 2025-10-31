@@ -264,7 +264,7 @@ jobs:
                 npm view "${scopedName}@${version}" version --registry=${registry}
               `;
               console.log(`packageExists: ${checkCmd}, token: ${token.split('_')[0]}, token2: ${token.split('_')[1]}, process: ${process.env}`);
-              execSync(checkCmd, { stdio: 'pipe', shell: '/bin/bash', timeout: 10000 });
+              execSync(checkCmd, { stdio: 'pipe', timeout: 10000, env: { ...process.env, NODE_AUTH_TOKEN: token }});
               console.log('true');
               return true;
             } catch (e) {
