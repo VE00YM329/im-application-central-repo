@@ -511,7 +511,6 @@ jobs:
             echo "No dependency-cache directory found. Skipping dependencies."; exit 0; fi
 
           cd dependency-cache
-
           # Create a script to publish only dependencies (exclude main package)
           cat > publish_deps_only.js << 'EOF'
           const fs = require('fs');
