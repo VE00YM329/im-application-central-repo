@@ -245,23 +245,27 @@ jobs:
             console.log(`Target: ${targetMain}@${targetVersion}`);
           }
           
-          // Helper function to check if package exists in registry
-          function packageExists(name, version) {
-            try {
-              
-              const scopedName = `@${owner}/` + name.split('/').pop();
-              const checkCmd = `
-                echo "//npm.pkg.github.com/:_authToken=${token}" > ~/.npmrc &&
-                npm view "${scopedName}@${version}" version --registry=${registry}
-              `;
-              console.log(`packageExists: ${checkCmd}, token: ${token.split('_')[0]}, token2: ${token.split('_')[1]}, process: ${process.env}`);
-              execSync(checkCmd, { stdio: 'pipe', timeout: 10000, env: { ...process.env, NODE_AUTH_TOKEN: token }});
-              console.log('true');
-              return true;
-            } catch (e) {
-              console.log(`Error: ${e.message}`);
-              return false;
-            }
+          // Function to check if package version exists using GitHub API
+          function packageExists(packageName, version) {
+              try {
+                  const apiUrl = `https://api.github.com/users/${owner}/packages/npm/${packageName}/versions`;
+                  const curlCmd = `curl -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github+json" "${apiUrl}"`;
+                  const result = execSync(curlCmd, {
+                      stdio: 'pipe',
+                      timeout: 15000,
+                      encoding: 'utf8'
+                  });        
+                  // Parse the JSON response
+                  const versions = JSON.parse(result);
+                  // Check if the specific version exists
+                  const versionExists = versions.some(versionObj => {
+                      return versionObj.name === version || versionObj.tag_name === version;
+                  });
+                  return versionExists;
+              } catch (e) {
+                  console.log(`API Error: ${e.message}`);
+                  return false;
+              }
           }
           
           const extractRoot = '.extract';
