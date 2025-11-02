@@ -424,6 +424,7 @@ jobs:
           for (const [key, meta] of Object.entries(pkgMeta)) {
             const pkgJsonPath = path.join(meta.dir, 'package.json');
             const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+            console.log(`package details: ${JSON.stringify(meta)}`);
             
             const newName = meta.scopedName;
             const originalVersion = meta.version;
