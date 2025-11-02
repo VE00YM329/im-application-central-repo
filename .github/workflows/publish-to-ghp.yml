@@ -261,11 +261,26 @@ jobs:
                       encoding: 'utf8'
                   });        
                   // Parse the JSON response
-                  const versions = JSON.parse(result);
+                  const response = JSON.parse(result);
+
+                  if (response.message) {
+                    console.log(`GitHub API Error: ${response.message}`);
+                    if (response.status === '404') {
+                      console.log(`Package '${packageName}' not found for user '${owner}'`);
+                    }
+                    return false;
+                  }
+                  
+                  // Check if response is an array of versions
+                  if (!Array.isArray(response)) {
+                      console.log('Unexpected response format - not an array of versions');
+                      return false;
+                  }
                   // Check if the specific version exists
-                  const versionExists = versions.some(versionObj => {
+                  const versionExists = response.some(versionObj => {
                       return versionObj.name === version || versionObj.tag_name === version;
                   });
+                  console.log(`Package ${packageName} version ${version} exists: ${versionExists}`);
                   return versionExists;
               } catch (e) {
                   console.log(`API Error: ${e.message}`);
@@ -541,11 +556,26 @@ jobs:
                       encoding: 'utf8'
                   });        
                   // Parse the JSON response
-                  const versions = JSON.parse(result);
+                  const response = JSON.parse(result);
+
+                  if (response.message) {
+                    console.log(`GitHub API Error: ${response.message}`);
+                    if (response.status === '404') {
+                      console.log(`Package '${packageName}' not found for user '${owner}'`);
+                    }
+                    return false;
+                  }
+                  
+                  // Check if response is an array of versions
+                  if (!Array.isArray(response)) {
+                      console.log('Unexpected response format - not an array of versions');
+                      return false;
+                  }
                   // Check if the specific version exists
-                  const versionExists = versions.some(versionObj => {
+                  const versionExists = response.some(versionObj => {
                       return versionObj.name === version || versionObj.tag_name === version;
                   });
+                  console.log(`Package ${packageName} version ${version} exists: ${versionExists}`);
                   return versionExists;
               } catch (e) {
                   console.log(`API Error: ${e.message}`);
