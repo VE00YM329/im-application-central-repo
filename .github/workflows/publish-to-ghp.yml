@@ -187,18 +187,20 @@ jobs:
         id: check_github_package
         run: |
           # Extract the base package name (remove scope if present) for the scoped package check
-          BASE_NAME=$(echo "${{ steps.sanitize_name.outputs.sanitized_name }}" | sed 's|.*/||')
-          SCOPED_PACKAGE_NAME="@${{ github.repository_owner }}/${BASE_NAME}"
-          
-          echo "Checking if package ${SCOPED_PACKAGE_NAME}@${{ steps.resolve_version.outputs.resolved_version }} exists..."
-          echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
-          
-          # Use the scoped name to check if the package exists in GitHub Packages
-          if npm view "${SCOPED_PACKAGE_NAME}@${{ steps.resolve_version.outputs.resolved_version }}" version --registry=https://npm.pkg.github.com > /dev/null 2>&1; then
-            echo "Package already exists in GitHub Packages. Skipping publish."
+          echo "Checking if npm package ${PACKAGE_NAME}@${VERSION} exists in GitHub Packages..."
+          RESPONSE=$(curl -s -H "Authorization: Bearer ${NODE_AUTH_TOKEN}" \
+                           -H "Accept: application/vnd.github+json" \
+                           https://api.github.com/users/${GITHUB_USER}/packages/npm/${PACKAGE_NAME}/versions)
+          VERSIONS=$(echo "$RESPONSE" | jq -r '.[].name' 2>/dev/null || true)
+          if echo "$VERSIONS" | grep -qx "${VERSION}"; then
+            echo "Package ${PACKAGE_NAME}@${VERSION} already exists in GitHub Packages."
             echo "exists=true" >> $GITHUB_OUTPUT
           else
-            echo "Package not found in GitHub Packages. Proceeding to publish."
+            if [ -n "$VERSIONS" ]; then
+              echo "Package ${PACKAGE_NAME} exists, but version ${VERSION} not found. Proceeding to publish."
+            else
+              echo "Package ${PACKAGE_NAME} not found in GitHub Packages. Proceeding to publish."
+            fi
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
         env:
