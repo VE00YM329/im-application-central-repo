@@ -292,7 +292,6 @@ jobs:
           if (!fs.existsSync(extractRoot)) fs.mkdirSync(extractRoot);
           
           // First pass: Quick scan to identify packages and check existence
-          console.log('\n=== Scanning tarballs ===');
           const packagesToProcess = [];
           
           for (const file of tgzFiles) {
@@ -356,7 +355,7 @@ jobs:
             process.exit(0);
           }
           
-          console.log(`\n=== Processing ${packagesToProcess.length} packages ===`);
+          console.log(`\nProcessing ${packagesToProcess.length} packages`);
           
           // Second pass: Extract and build metadata only for packages that need processing
           const map = {}; // "originalName@version" -> scopedName
@@ -419,7 +418,7 @@ jobs:
           }
           
           // Third pass: Rewrite & publish
-          console.log('\n=== Publishing packages ===');
+          console.log('\nPublishing packages...');
           let published = 0, errors = 0;
           
           for (const [key, meta] of Object.entries(pkgMeta)) {
