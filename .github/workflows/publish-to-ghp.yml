@@ -472,14 +472,16 @@ jobs:
             console.log(`Publishing: ${id}`);
           
             try {
-              const publishCmd = `npm publish --ignore-scripts --registry=${registry} --no-git-checks`;
+
+              const cachePath = path.resolve(process.cwd(), '.npm-cache');
+              const publishCmd = `npm publish --ignore-scripts --registry=${registry} --no-git-checks --cache="${cachePath}"`;
+              
               execSync(publishCmd, {
                 cwd: meta.dir,
                 stdio: 'inherit',
                 env: { 
                   ...process.env, 
-                  NODE_AUTH_TOKEN: token,
-                  npm_config_cache: path.join(process.cwd(), '.npm-cache')
+                  NODE_AUTH_TOKEN: token
                 },
                 timeout: 120000
               });
