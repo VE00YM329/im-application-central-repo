@@ -205,6 +205,9 @@ jobs:
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          GITHUB_USER: ${{ github.repository_owner }}
+          PACKAGE_NAME: ${{ steps.sanitize_name.outputs.sanitized_name }}
+          VERSION: ${{ steps.resolve_version.outputs.resolved_version }}
 
       - name: Publish Full Dependency Graph (ReScoped)
         if: steps.check_github_package.outputs.exists == 'false'
@@ -518,8 +521,7 @@ jobs:
 
           const owner = process.env.GH_OWNER;
           const mainPackage = process.env.GH_MAIN;
-          if (!owner) { console.error('GH_OWNER env missing'); process.exit(1); }
-          const  = process.env.NODE_AUTH_TOKEN || '';
+          const token = process.env.NODE_AUTH_TOKEN || '';
 
           const registry = 'https://npm.pkg.github.com';
           const tgzFiles = fs.readdirSync('.').filter(f => f.endsWith('.tgz'));
@@ -527,6 +529,29 @@ jobs:
 
           const extractRoot = '.extract';
           if (!fs.existsSync(extractRoot)) fs.mkdirSync(extractRoot);
+
+          // Function to check if package version exists using GitHub API
+          function packageExists(packageName, version) {
+              try {
+                  const apiUrl = `https://api.github.com/users/${owner}/packages/npm/${packageName}/versions`;
+                  const curlCmd = `curl -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github+json" "${apiUrl}"`;
+                  const result = execSync(curlCmd, {
+                      stdio: 'pipe',
+                      timeout: 15000,
+                      encoding: 'utf8'
+                  });        
+                  // Parse the JSON response
+                  const versions = JSON.parse(result);
+                  // Check if the specific version exists
+                  const versionExists = versions.some(versionObj => {
+                      return versionObj.name === version || versionObj.tag_name === version;
+                  });
+                  return versionExists;
+              } catch (e) {
+                  console.log(`API Error: ${e.message}`);
+                  return false;
+              }
+          }
 
           let published = 0, skipped = 0, errors = 0;
 
@@ -569,20 +594,10 @@ jobs:
               fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
               
               const id = `${pkg.name}@${pkg.version}`;
-              
-              // Check if package already exists
-              try {
-                const checkCmd = `npm view "${pkg.name}@${pkg.version}" version --registry=${registry}`;
-                execSync(checkCmd, { 
-                  stdio: 'pipe', 
-                  env: { ...process.env, NODE_AUTH_TOKEN: token },
-                  timeout: 30000
-                });
-                console.log('Dependency exists, skipping:', id);
+              if (packageExists(pkg.name, pkg.version)) {
+                console.log('Dependency already exists, skipping:', id);
                 skipped++;
                 continue;
-              } catch { 
-                console.log('Dependency not found, will publish:', id);
               }
               
               // Publish the package
