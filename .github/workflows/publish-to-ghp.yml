@@ -433,6 +433,16 @@ jobs:
               console.warn(`Version mismatch for ${key}: fixing ${pkg.version} -> ${originalVersion}`);
               pkg.version = originalVersion;
             }
+
+            // FIX: Clean invalid main field (must be string, not array)
+            if (Array.isArray(pkg.main)) {
+              console.log(`Warning: 'main' field is an array, converting to string or removing`);
+              if (pkg.main.length > 0) {
+                pkg.main = pkg.main[0]; // Use first entry
+              } else {
+                delete pkg.main; // Remove if empty
+              }
+            }
             
             // Update name
             pkg.name = newName;
@@ -468,7 +478,6 @@ jobs:
               continue;
             }
           
-            console.log(`pkg: ${JSON.stringify(pkg, null, 2)}`);
             const id = `${pkg.name}@${originalVersion}`;
             console.log(`Publishing: ${id}`);
           
