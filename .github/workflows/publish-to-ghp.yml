@@ -624,7 +624,7 @@ jobs:
               fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
               
               const id = `${pkg.name}@${pkg.version}`;
-              if (packageExists(pkg.name, pkg.version)) {
+              if (packageExists(originalName, pkg.version)) {
                 console.log('Dependency already exists, skipping:', id);
                 skipped++;
                 continue;
