@@ -191,6 +191,7 @@ jobs:
           SCOPED_PACKAGE_NAME="@${{ github.repository_owner }}/${BASE_NAME}"
           
           echo "Checking if package ${SCOPED_PACKAGE_NAME}@${{ steps.resolve_version.outputs.resolved_version }} exists..."
+          echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           
           # Use the scoped name to check if the package exists in GitHub Packages
           if npm view "${SCOPED_PACKAGE_NAME}@${{ steps.resolve_version.outputs.resolved_version }}" version --registry=https://npm.pkg.github.com > /dev/null 2>&1; then
@@ -230,12 +231,7 @@ jobs:
           const path = require('path');
           const { execSync } = require('child_process');
           
-          const owner = process.env.GH_OWNER;
-          if (!owner) {
-            console.error('GH_OWNER env missing');
-            process.exit(1);
-          }
-          
+          const owner = process.env.GH_OWNER;          
           const token = process.env.NODE_AUTH_TOKEN || '';
           const registry = 'https://npm.pkg.github.com';
           
@@ -243,12 +239,7 @@ jobs:
           const targetMain = process.env.GH_MAIN || '';
           const targetVersion = process.env.MAIN_VERSION || '';
           
-          const tgzFiles = fs.readdirSync('.').filter(f => f.endsWith('.tgz'));
-          if (!tgzFiles.length) {
-            console.log('No tgz files found');
-            process.exit(0);
-          }
-          
+          const tgzFiles = fs.readdirSync('.').filter(f => f.endsWith('.tgz'));          
           console.log('Found tarballs:', tgzFiles.length);
           if (targetMain && targetVersion) {
             console.log(`Target: ${targetMain}@${targetVersion}`);
