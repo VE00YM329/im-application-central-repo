@@ -132,11 +132,19 @@ jobs:
           done < ../dependency-cache/package-list.txt
           
           # Also handle the main package separately for publishing
+
+          # Also handle the main package separately for publishing
           cd "${WORKSPACE_ROOT}/../cached-packages"
+
+          # Pack the main package (handle both scoped and unscoped)
           npm pack ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} --registry=https://registry.npmjs.org/
-          
-          # Extract and modify the main package
-          tar -xzf ${{ steps.sanitize_name.outputs.sanitized_name }}-${{ steps.resolve_version.outputs.resolved_version }}.tgz
+
+          # Dynamically detect the generated tarball name (works for @scoped and normal)
+          TARBALL=$(ls -1 *.tgz | head -1)
+          echo "Extracting tarball: $TARBALL"
+
+          # Extract the package tarball
+          tar -xzf "$TARBALL"
           cd package
           cp package.json package.json.backup
           
