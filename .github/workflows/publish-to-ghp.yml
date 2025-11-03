@@ -225,15 +225,28 @@ jobs:
           MAIN_ORIG_NAME=${{ steps.sanitize_name.outputs.sanitized_name }}
           MAIN_VERSION=${{ steps.resolve_version.outputs.resolved_version }}
 
-          # Collect all tarballs (dependencies + main)
+          # Check if dependency-cache exists
           if [ ! -d dependency-cache ]; then
-            echo "No dependency-cache directory found. Aborting publish graph step."; exit 1; fi
-          if ls dependency-cache/*.tgz 1>/dev/null 2>&1; then
-            echo "Dependency tgz files present."; else echo "No dependency tgz files found."; fi
+            echo "No dependency-cache directory found. Creating it..."
+            mkdir -p dependency-cache
+          fi
 
-          # Ensure main package tarball exists (from cached-packages step)
-          if ls cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz 1>/dev/null 2>&1; then
-            cp cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz dependency-cache/ 2>/dev/null || true
+          # Check for dependency tgz files
+          dep_count=$(ls dependency-cache/*.tgz 2>/dev/null | wc -l)
+          if [ "$dep_count" -eq 0 ]; then
+            echo "No dependency tgz files found. This package likely has no dependencies."
+            echo "Only publishing the main package."
+          else
+            echo "Found $dep_count dependency tgz file(s)."
+          fi
+
+          # Ensure main package tarball exists
+          if [ -f "cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz" ]; then
+            echo "Copying main package tarball to dependency-cache..."
+            cp "cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz" dependency-cache/
+          else
+            echo "ERROR: Main package tarball not found!"
+            exit 1
           fi
 
           cd dependency-cache
