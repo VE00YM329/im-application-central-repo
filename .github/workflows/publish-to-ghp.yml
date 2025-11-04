@@ -159,7 +159,6 @@ jobs:
           echo "Detected extracted package directory: $PKG_DIR"
           cd "$PKG_DIR"
           
-          cd package
           cp package.json package.json.backup
           
           # Update package.json with scoped name and publishConfig
