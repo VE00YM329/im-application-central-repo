@@ -145,10 +145,9 @@ jobs:
           cd "${WORKSPACE_ROOT}/../cached-packages"
 
           # Pack the main package (handle both scoped and unscoped)
-          npm pack ${{ github.event.inputs.package_name }}@${{ steps.resolve_version.outputs.resolved_version }} --registry=https://registry.npmjs.org/
+          TARBALL=$(npm pack ${{ github.event.inputs.package_name }}@${{ steps.resolve_version.outputs.resolved_version }} --registry=https://registry.npmjs.org/)
 
           # Dynamically detect the generated tarball name (works for @scoped and normal)
-          TARBALL=$(ls -1 *.tgz | head -1)
           echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} "
           
           tar -xzf "$TARBALL"
