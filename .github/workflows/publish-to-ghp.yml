@@ -150,10 +150,10 @@ jobs:
           # Dynamically detect the generated tarball name (works for @scoped and normal)
           echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} "
           
-          tar -xzf "$TARBALL"
+          tar -tf "$TARBALL"
           echo "Extracted contents:"
           ls -R .
-
+          
           cd package
           cp package.json package.json.backup
           
