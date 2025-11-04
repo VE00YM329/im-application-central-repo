@@ -143,12 +143,6 @@ jobs:
           TARBALL=$(ls -1 *.tgz | head -1)
           echo "Extracting tarball: $TARBALL"
 
-          # Rename tarball to include full scoped-safe name
-          SAFE_NAME=$(echo "${{ steps.sanitize_name.outputs.sanitized_name }}" | sed 's/[@\/]/_/g')
-          NEW_TARBALL="${SAFE_NAME}-${{ steps.resolve_version.outputs.resolved_version }}.tgz"
-          mv "$TARBALL" "../cached-packages/$NEW_TARBALL"
-          echo "Renamed tarball to: $NEW_TARBALL"
-
           # Extract the package tarball
           tar -xzf "$TARBALL"
           cd package
@@ -246,15 +240,11 @@ jobs:
             echo "Found $dep_count dependency tgz file(s)."
           fi
 
-          SAFE_NAME=$(echo "$MAIN_ORIG_NAME" | sed 's/[@\/]/_/g')
-          MAIN_TARBALL="cached-packages/${SAFE_NAME}-${MAIN_VERSION}.tgz"
-          echo "Looking for main tarball: $MAIN_TARBALL"
-          if [ -f "$MAIN_TARBALL" ]; then
-            echo "Found main package tarball: $MAIN_TARBALL"
-            cp "$MAIN_TARBALL" dependency-cache/
+          if [ -f "cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz" ]; then
+            echo "Copying main package tarball to dependency-cache..."
+            cp "cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz" dependency-cache/
           else
-            echo "ERROR: Main package tarball not found! Listing cached-packages:"
-            ls -la cached-packages || true
+            echo "ERROR: Main package tarball not found!"
             exit 1
           fi
 
