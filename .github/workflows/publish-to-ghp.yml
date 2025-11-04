@@ -291,6 +291,10 @@ jobs:
           // Function to check if package version exists using GitHub API
           function packageExists(packageName, version) {
               try {
+                  if (packageName.startsWith('@')) {
+                    const [scope, pkg] = packageName.split('/');
+                    packageName = `${scope.substring(1)}-${pkg}`;
+                  }
                   const apiUrl = `https://api.github.com/users/${owner}/packages/npm/${packageName}/versions`;
                   const curlCmd = `curl -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github+json" "${apiUrl}"`;
                   const result = execSync(curlCmd, {
