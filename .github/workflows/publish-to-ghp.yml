@@ -150,9 +150,14 @@ jobs:
           # Dynamically detect the generated tarball name (works for @scoped and normal)
           echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} "
           
-          tar -tf "$TARBALL"
-          echo "Extracted contents:"
-          ls -R .
+          EXTRACT_DIR="extract"
+          mkdir "$EXTRACT_DIR"
+          # Extract tarball
+          tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
+          # Automatically detect the extracted folder
+          PKG_DIR=$(find "$EXTRACT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+          echo "Detected extracted package directory: $PKG_DIR"
+          cd "$PKG_DIR"
           
           cd package
           cp package.json package.json.backup
