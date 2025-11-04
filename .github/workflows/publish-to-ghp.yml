@@ -49,6 +49,12 @@ jobs:
           fi
           echo "Resolved version: $(echo $ACTUAL_VERSION)"
 
+      - name: Create Safe Package Name
+        id: safe_name
+        run: |
+          SAFE_NAME=$(echo "${{ steps.sanitize_name.outputs.sanitized_name }}" | sed 's/[@\/]/-/g')
+          echo "safe_name=$SAFE_NAME" >> $GITHUB_OUTPUT
+
       - name: Cache NPM Package and Dependencies
         id: cache_package
         uses: actions/cache@v4
@@ -56,9 +62,9 @@ jobs:
           path: |
             ./cached-packages
             ./dependency-cache
-          key: npm-package-with-deps-${{ steps.sanitize_name.outputs.sanitized_name }}-${{ steps.resolve_version.outputs.resolved_version }}
+          key: npm-package-with-deps-${{ steps.safe_name.outputs.safe_name }}-${{ steps.resolve_version.outputs.resolved_version }}
           restore-keys: |
-            npm-package-with-deps-${{ steps.sanitize_name.outputs.sanitized_name }}-
+            npm-package-with-deps-${{ steps.safe_name.outputs.safe_name }}-
 
       - name: Download Package and All Dependencies from NPM
         if: steps.cache_package.outputs.cache-hit != 'true'
@@ -141,10 +147,12 @@ jobs:
 
           # Dynamically detect the generated tarball name (works for @scoped and normal)
           TARBALL=$(ls -1 *.tgz | head -1)
-          echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} "
-
-          # Extract the package tarball
-          tar -xzf "$TARBALL"
+          echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} "          
+          SAFE_TARBALL="${{ steps.safe_name.outputs.safe_name }}-${{ steps.resolve_version.outputs.resolved_version }}.tgz"
+          mv "$TARBALL" "$SAFE_TARBALL"
+          echo "Extracting tarball to: $SAFE_TARBALL"
+          tar -xzf "$SAFE_TARBALL"
+          
           cd package
           cp package.json package.json.backup
           
@@ -240,10 +248,9 @@ jobs:
             echo "Found $dep_count dependency tgz file(s)."
           fi
 
-          echo "Main Package Tarball: cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz"
-          if [ -f "cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz" ]; then
-            echo "Copying main package tarball to dependency-cache..."
-            cp "cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz" dependency-cache/
+          echo "Main Package Tarball: cached-packages/${{ steps.safe_name.outputs.safe_name }}-${MAIN_VERSION}.tgz"
+          if [ -f "cached-packages/${{ steps.safe_name.outputs.safe_name }}-${MAIN_VERSION}.tgz" ]; then
+            cp "cached-packages/${{ steps.safe_name.outputs.safe_name }}-${MAIN_VERSION}.tgz" dependency-cache/
           else
             echo "ERROR: Main package tarball not found!"
             exit 1
