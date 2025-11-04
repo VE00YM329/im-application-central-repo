@@ -32,7 +32,7 @@ jobs:
         run: |
           # This step removes the version from the package name if the user accidentally includes it.
           # It correctly handles both regular and scoped packages 
-          SANITIZED_NAME=$(echo "${{ github.event.inputs.package_name }}" | sed 's/@[0-9][^@]*$//')
+          SANITIZED_NAME=$(echo "${{ github.event.inputs.package_name }}" | sed 's/^@//' | sed 's/\//-/g')
           echo "Original package name input: ${{ github.event.inputs.package_name }}, Version: ${{ github.event.inputs.package_version }}"
           echo "Sanitized package name: $SANITIZED_NAME"
           echo "sanitized_name=$SANITIZED_NAME" >> $GITHUB_OUTPUT
