@@ -52,7 +52,9 @@ jobs:
       - name: Create Safe Package Name
         id: safe_name
         run: |
-          SAFE_NAME=$(echo "${{ steps.sanitize_name.outputs.sanitized_name }}" | sed 's/[@\/]/-/g')
+          RAW_NAME="${{ steps.sanitize_name.outputs.sanitized_name }}"
+          SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[@\/]/-/g; s/^-*//')
+          echo "Sanitized from '$RAW_NAME' → '$SAFE_NAME'"
           echo "safe_name=$SAFE_NAME" >> $GITHUB_OUTPUT
 
       - name: Cache NPM Package and Dependencies
