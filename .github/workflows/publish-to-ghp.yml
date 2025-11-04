@@ -348,9 +348,20 @@ jobs:
             try {
               // Quick extract just to read package.json
               if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-              execSync(`tar -xzf ${file} -C ${tempDir} package/package.json`, { stdio: 'pipe' });
-              
-              const pkgPath = path.join(tempDir, 'package', 'package.json');
+
+              const topLevelDir = execSync(`tar -tf ${file} | head -1`)
+                .toString()
+                .trim()
+                .replace(/\/.*/, "");
+            
+              console.log("Detected top-level folder:", topLevelDir);
+            
+              // extract only package.json
+              execSync(`tar -xzf ${file} -C ${tempDir} ${topLevelDir}/package.json`, {
+                stdio: "pipe",
+              });
+                            
+              const pkgPath = path.join(tempDir, topLevelDir, 'package.json');
               if (!fs.existsSync(pkgPath)) {
                 console.warn(`Missing package.json in ${file}, skipping`);
                 continue;
@@ -416,8 +427,8 @@ jobs:
             try {
               if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
               execSync(`tar -xzf ${file} -C ${outDir}`, { stdio: 'pipe' });
-              
-              const pkgPath = path.join(outDir, 'package', 'package.json');
+              const topLevelDir = execSync(`tar -tf ${file} | head -1`).toString().trim().replace(/\/.*/, "");
+              const pkgPath = path.join(outDir, topLevelDir, 'package.json');
               const key = `${origName}@${origVersion}`;
               
               map[key] = scopedName;
