@@ -141,7 +141,7 @@ jobs:
 
           # Dynamically detect the generated tarball name (works for @scoped and normal)
           TARBALL=$(ls -1 *.tgz | head -1)
-          echo "Extracting tarball: $TARBALL"
+          echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} "
 
           # Extract the package tarball
           tar -xzf "$TARBALL"
@@ -153,7 +153,7 @@ jobs:
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             const originalName = pkg.name;
-            pkg.name = '@${{ github.repository_owner }}/' + '${{ steps.sanitize_name.outputs.sanitized_name }}'.split('/').pop();
+            pkg.name = '@${{ github.repository_owner }}/' + '${{ steps.sanitize_name.outputs.sanitized_name }}';
             pkg.publishConfig = { registry: 'https://npm.pkg.github.com' };
             if (!pkg.repository) {
               pkg.repository = {
@@ -240,6 +240,7 @@ jobs:
             echo "Found $dep_count dependency tgz file(s)."
           fi
 
+          echo "Main Package Tarball: cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz"
           if [ -f "cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz" ]; then
             echo "Copying main package tarball to dependency-cache..."
             cp "cached-packages/${MAIN_ORIG_NAME}-${MAIN_VERSION}.tgz" dependency-cache/
