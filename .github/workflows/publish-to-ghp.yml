@@ -277,6 +277,16 @@ jobs:
           if (targetMain && targetVersion) {
             console.log(`Target: ${targetMain}@${targetVersion}`);
           }
+
+          // Function to build a properly re-scoped name for publishing to GitHub Packages
+          function getRescopedName(origName, owner) {
+            if (origName.startsWith('@')) {
+              const [scope, pkg] = origName.split('/');
+              return `@${owner}/${scope.substring(1)}-${pkg}`;
+            } else {
+              return `@${owner}/${origName}`;
+            }
+          }
           
           // Function to check if package version exists using GitHub API
           function packageExists(packageName, version) {
@@ -340,7 +350,7 @@ jobs:
               const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
               const origName = pkg.name;
               const origVersion = pkg.version;
-              const scopedName = `@${owner}/` + origName.split('/').pop();
+              const scopedName = getRescopedName(origName, owner);
               
               console.log(`Found: ${origName}@${origVersion}`);
               
@@ -426,25 +436,22 @@ jobs:
           function rewriteDeps(obj) {
             if (!obj) return obj;
             const out = {};
+          
             for (const [name, range] of Object.entries(obj)) {
               let newName = name;
           
-              // Check if this package was re-scoped earlier
+              // First: check if this package was re-scoped earlier and exists in the map
               const mapEntry = Object.entries(map).find(([key]) => key.startsWith(name + '@'));
               if (mapEntry) {
                 newName = mapEntry[1];
               } else {
-                // Apply default re-scope rule if not explicitly in map
-                if (name.startsWith('@')) {
-                  const cleaned = name.substring(1).replace('/', '-');
-                  newName = `@${owner}/${cleaned}`;
-                } else {
-                  newName = `@${owner}/${name}`;
-                }
+                // Default fallback: apply GitHub re-scope rule
+                newName = getRescopedName(name, owner);
               }
           
               out[newName] = range;
             }
+          
             return out;
           }
           
