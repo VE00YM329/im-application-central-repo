@@ -81,13 +81,13 @@ jobs:
             "name": "temp-installer",
             "version": "1.0.0",
             "dependencies": {
-              "${{ steps.sanitize_name.outputs.sanitized_name }}": "${{ steps.resolve_version.outputs.resolved_version }}"
+              "${{ github.event.inputs.package_name }}": "${{ steps.resolve_version.outputs.resolved_version }}"
             }
           }
           EOF
           
           # Install the package and all its dependencies
-          echo "Installing ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} and all dependencies..."
+          echo "Installing ${{ github.event.inputs.package_name }}@${{ steps.resolve_version.outputs.resolved_version }} and all dependencies..."
           npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
           
           # Create dependency list
@@ -113,7 +113,7 @@ jobs:
             pkg_version=$(node -p "require('./package.json').version" 2>/dev/null) || continue
             
             # Skip the main package - we handle it separately
-            if [ "$pkg_name" = "${{ steps.sanitize_name.outputs.sanitized_name }}" ]; then
+            if [ "$pkg_name" = "${{ github.event.inputs.package_name }}" ]; then
               echo "Skipping main package: $pkg_name@$pkg_version (handled separately)"
               cd "$original_dir"
               continue
@@ -145,7 +145,7 @@ jobs:
           cd "${WORKSPACE_ROOT}/../cached-packages"
 
           # Pack the main package (handle both scoped and unscoped)
-          npm pack ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} --registry=https://registry.npmjs.org/
+          npm pack ${{ github.event.inputs.package_name }}@${{ steps.resolve_version.outputs.resolved_version }} --registry=https://registry.npmjs.org/
 
           # Dynamically detect the generated tarball name (works for @scoped and normal)
           TARBALL=$(ls -1 *.tgz | head -1)
