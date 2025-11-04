@@ -427,20 +427,23 @@ jobs:
             if (!obj) return obj;
             const out = {};
             for (const [name, range] of Object.entries(obj)) {
-              // Try to find matching scoped name from any version
-              let scopedName = null;
-              for (const [key, scoped] of Object.entries(map)) {
-                const pkgName = key.split('@')[0];
-                if (pkgName === name) {
-                  scopedName = scoped;
-                  break;
+              let newName = name;
+          
+              // Check if this package was re-scoped earlier
+              const mapEntry = Object.entries(map).find(([key]) => key.startsWith(name + '@'));
+              if (mapEntry) {
+                newName = mapEntry[1];
+              } else {
+                // Apply default re-scope rule if not explicitly in map
+                if (name.startsWith('@')) {
+                  const cleaned = name.substring(1).replace('/', '-');
+                  newName = `@${owner}/${cleaned}`;
+                } else {
+                  newName = `@${owner}/${name}`;
                 }
               }
-              if (scopedName) {
-                out[scopedName] = range;
-              } else {
-                out[name] = range;
-              }
+          
+              out[newName] = range;
             }
             return out;
           }
