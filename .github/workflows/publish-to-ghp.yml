@@ -501,6 +501,12 @@ jobs:
                 delete pkg.main; // Remove if empty
               }
             }
+
+            // Remove private field if present
+            if (pkg.private) {
+              console.log(`Removing 'private' field from ${key}`);
+              delete pkg.private;
+            }
             
             // Update name
             pkg.name = newName;
