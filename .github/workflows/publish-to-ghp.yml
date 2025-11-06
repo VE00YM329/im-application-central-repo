@@ -166,7 +166,7 @@ jobs:
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             const originalName = pkg.name;
-            pkg.name = '@${{ github.repository_owner }}/' + '${{ steps.sanitize_name.outputs.sanitized_name }}';
+            pkg.name = '@${{ github.repository_owner }}/'.toLowerCase() + '${{ steps.sanitize_name.outputs.sanitized_name }}'.toLowerCase();
             pkg.publishConfig = { registry: 'https://npm.pkg.github.com' };
             if (!pkg.repository) {
               pkg.repository = {
@@ -292,6 +292,8 @@ jobs:
               return `@${owner}/${origName}`;
             }
           }
+
+          
           
           // Function to check if package version exists using GitHub API
           function packageExists(packageName, version) {
@@ -507,20 +509,9 @@ jobs:
               console.log(`Removing 'private' field from ${key}`);
               delete pkg.private;
             }
-
-            // Convert ANY package (scoped/unscoped) into @OWNER/<name>
-            function toOwnerScoped(name, owner) {
-              if (name.startsWith('@')) {
-                const [scope, pkg] = name.split('/');
-                return `@${owner}/${scope.substring(1)}-${pkg}`;
-              }
-              return `@${owner}/${name}`;
-            }
-            
-            const scopedName = toOwnerScoped(newName, owner);
             
             // Update name
-            pkg.name = scopedName;
+            pkg.name = newName;
             pkg.publishConfig = { registry };
           
             // Rewrite dependency graphs
@@ -631,6 +622,15 @@ jobs:
           const extractRoot = '.extract';
           if (!fs.existsSync(extractRoot)) fs.mkdirSync(extractRoot);
 
+          function toOwnerScoped(name, owner) {
+            owner = owner.toLowerCase();
+            if (name.startsWith('@')) {
+              const [scope, pkg] = name.split('/');
+              return `@${owner}/${(scope.substring(1) + '-' + pkg).toLowerCase()}`;
+            }
+            return `@${owner}/${name.toLowerCase()}`;
+          }
+
           // Function to check if package version exists using GitHub API
           function packageExists(packageName, version) {
               try {
@@ -695,7 +695,8 @@ jobs:
               }
               
               // Transform to scoped package
-              const scopedName = `@${owner}/` + originalName.split('/').pop();
+              const scopedName = toOwnerScoped(originalName, owner.toLowerCase());
+
               pkg.name = scopedName;
               pkg.publishConfig = { registry };
               
