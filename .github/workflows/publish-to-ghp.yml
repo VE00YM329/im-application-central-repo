@@ -150,7 +150,7 @@ jobs:
           # Dynamically detect the generated tarball name (works for @scoped and normal)
           echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}@${{ steps.resolve_version.outputs.resolved_version }} "
           
-          EXTRACT_DIR="extract"
+          EXTRACT_DIR="extract-$(date +%s)"
           mkdir "$EXTRACT_DIR"
           # Extract tarball
           tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
