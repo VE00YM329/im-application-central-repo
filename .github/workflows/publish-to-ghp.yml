@@ -507,9 +507,20 @@ jobs:
               console.log(`Removing 'private' field from ${key}`);
               delete pkg.private;
             }
+
+            // Convert ANY package (scoped/unscoped) into @OWNER/<name>
+            function toOwnerScoped(name, owner) {
+              if (name.startsWith('@')) {
+                const [scope, pkg] = name.split('/');
+                return `@${owner}/${scope.substring(1)}-${pkg}`;
+              }
+              return `@${owner}/${name}`;
+            }
+            
+            const scopedName = toOwnerScoped(newName, owner);
             
             // Update name
-            pkg.name = newName;
+            pkg.name = scopedName;
             pkg.publishConfig = { registry };
           
             // Rewrite dependency graphs
