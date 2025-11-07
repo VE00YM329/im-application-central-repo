@@ -495,12 +495,13 @@ jobs:
             }
 
             // FIX: Clean invalid main field (must be string, not array)
-            if (Array.isArray(pkg.main)) {
-              console.log(`Warning: 'main' field is an array, converting to string or removing`);
-              if (pkg.main.length > 0) {
-                pkg.main = pkg.main[0]; // Use first entry
+            if (pkg.main !== undefined && typeof pkg.main !== 'string') {
+              if (Array.isArray(pkg.main) && pkg.main.length > 0) {
+                // Convert array to first element
+                pkg.main = pkg.main[0];
               } else {
-                delete pkg.main; // Remove if empty
+                // Delete if boolean, object, empty array, null, etc.
+                delete pkg.main;
               }
             }
 
