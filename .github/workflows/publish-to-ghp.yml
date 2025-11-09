@@ -410,19 +410,29 @@ jobs:
             console.log(`Publishing: ${pkg.scopedName}@${pkg.origVer}`);
             
             try {
-              execSync(
-                'npm publish --ignore-scripts --access=public',
+              try {
+                const output = execSync(
+                'npm publish --ignore-scripts --access=public --loglevel=verbose',
                 {
                   cwd: pkg.dir,
-                  stdio: 'pipe',
+                  encoding: 'utf8',
                   env: { 
                     ...process.env, 
                     NODE_AUTH_TOKEN: TOKEN,
                     npm_config_registry: REGISTRY
-                  },
-                  timeout: 120000
+                  }
                 }
               );
+              console.log(output);
+              console.log(`Published OK\n`);
+            } catch (e) {
+              console.log("\n PUBLISH ERROR DUMP\n");
+              console.log(e.stdout?.toString() || '');
+              console.log(e.stderr?.toString() || '');
+              console.log("\n");
+              throw e;
+            }
+
               console.log(`Published\n`);
               published++;
             } catch (e) {
