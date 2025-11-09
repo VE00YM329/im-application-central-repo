@@ -113,9 +113,10 @@ jobs:
             if [ -z "$pkg_name" ] || [ -z "$pkg_version" ]; then
               return 0
             fi
-            
+
+            echo "=== Packing all packages ==="            
             safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
-            local cache_file="$WORKSPACE_ROOT/dependency-cache/${safe_name}__${pkg_version}.tgz"
+            local cache_file="$WORKSPACE_ROOT/dependency-cache/${safe_name}-${pkg_version}.tgz"
             
             # Skip if already cached
             if [ -f "$cache_file" ]; then
@@ -212,7 +213,7 @@ jobs:
           
           echo ""
           echo "Sample packages (first 10):"
-          ls -1 dependency-cache/*.tgz 2>/dev/null | head -10 | sed 's|dependency-cache/||; s|__| @ |; s|\.tgz$||; s|_|/|g' | sed 's/^/  /'
+          ls -1 dependency-cache/*.tgz 2>/dev/null | head -10 | sed 's|dependency-cache/||; s|-| @ |; s|\.tgz$||; s|_|/|g' | sed 's/^/  /'
 
       - name: Publish Complete Dependency Graph to GitHub Packages
         run: |          
