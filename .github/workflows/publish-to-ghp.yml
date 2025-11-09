@@ -116,7 +116,8 @@ jobs:
 
             echo "=== Packing all packages ==="            
             safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
-            local cache_file="$WORKSPACE_ROOT/dependency-cache/${safe_name}-${pkg_version}.tgz"
+            local cache_file="${GITHUB_WORKSPACE}/dependency-cache/${safe_name}-${pkg_version}.tgz"
+            mkdir -p "${GITHUB_WORKSPACE}/dependency-cache"
             
             # Skip if already cached
             if [ -f "$cache_file" ]; then
@@ -135,7 +136,6 @@ jobs:
             fi
           }
           
-          export WORKSPACE_ROOT=$(pwd)
           export -f pack_package
           
           # Process all node_modules directories
