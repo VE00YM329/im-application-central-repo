@@ -117,6 +117,7 @@ jobs:
             safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
       
             # Pack dependency
+            npm config set ignore-scripts true
             if npm pack --ignore-scripts --loglevel=error 2>/dev/null; then
               tgz_file=$(ls *.tgz 2>/dev/null | head -1)
               if [ -n "$tgz_file" ]; then
