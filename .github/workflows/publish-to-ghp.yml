@@ -117,7 +117,7 @@ jobs:
             safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
       
             # Pack dependency
-            if npm pack --quiet 2>/dev/null; then
+            if npm pack --ignore-scripts --quiet 2>/dev/null; then
               tgz_file=$(ls *.tgz 2>/dev/null | head -1)
               if [ -n "$tgz_file" ]; then
                 mv "$tgz_file" "${WORKSPACE_ROOT}/../dependency-cache/${safe_name}-${pkg_version}.tgz"
@@ -133,7 +133,7 @@ jobs:
           cd "${WORKSPACE_ROOT}/../cached-packages"
       
           echo "Packing main package..."
-          TARBALL=$(npm pack ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }} --registry=https://registry.npmjs.org/)
+          TARBALL=$(npm pack ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }} --registry=https://registry.npmjs.org/ --ignore-scripts)
       
           echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}"
       
