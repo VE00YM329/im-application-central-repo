@@ -302,16 +302,21 @@ jobs:
               if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
               
               execSync(`tar -xzf "${file}" -C "${outDir}"`, { stdio: 'pipe' });
-              
-              const topDir = execSync(`tar -tf "${file}" | head -1`)
-                .toString().trim().replace(/\/.*/, '');
-              
+
+                // Find the first folder in the .tgz
+              const topDir = execSync(`tar -tf "${file}"`)
+                .toString()
+                .split('\n')
+                .map(line => line.split('/')[0])
+                .find(x => x && !x.includes('.')) || 'package';
+
               const pkgJsonPath = path.join(outDir, topDir, 'package.json');
               
               if (!fs.existsSync(pkgJsonPath)) {
                 console.warn(`  Warning: No package.json in ${file}`);
                 continue;
               }
+
               
               const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
               const origName = pkg.name;
@@ -410,6 +415,15 @@ jobs:
               );
               toRemove.forEach(k => delete pkgData.scripts[k]);
             }
+
+            const npmIgnorePath = path.join(pkg.dir, '.npmignore');
+            if (fs.existsSync(npmIgnorePath)) {
+              fs.unlinkSync(npmIgnorePath);
+            }
+            
+            if (pkgData.files) {
+              delete pkgData.files;
+            }
             
             // Add repository
             if (!pkgData.repository) {
@@ -420,6 +434,16 @@ jobs:
             }
             
             fs.writeFileSync(pkgJsonPath, JSON.stringify(pkgData, null, 2));
+            
+            // Fix #4 — Re-pack tarball after rewrite
+            console.log(`Repacking tarball for ${pkg.scopedName}@${pkg.origVer} ...`);
+            const newTgz = execSync(
+              'npm pack --ignore-scripts',
+              { cwd: pkg.dir, encoding: 'utf8' }
+            ).trim();
+            
+            // Absolute path to new tarball
+            const tarballPath = path.join(pkg.dir, newTgz);
             
             // Publish
             console.log(`Publishing: ${pkg.scopedName}@${pkg.origVer}`);
@@ -438,6 +462,10 @@ jobs:
                   }
                 }
               );
+              if (!packageExists(pkg.scopedName, pkg.origVer)) {
+                console.error(`NOT indexed by GitHub: ${pkg.scopedName}`)
+              }
+
               console.log(output);
               console.log(`Published OK\n`);
             } catch (e) {
