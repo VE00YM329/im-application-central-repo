@@ -82,6 +82,11 @@ jobs:
             }
           }
           EOF
+
+          #Install npmignore globally to prevent packing errors
+          echo "Installing npmignore globally..."
+          npm install -g npmignore
+          
           
           # Install ALL dependencies (including transitive)
           echo "Installing dependencies..."
