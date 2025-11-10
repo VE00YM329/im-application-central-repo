@@ -132,9 +132,7 @@ jobs:
           
             tgz_file=$(npm pack "$pkg_path" \
               --ignore-scripts \
-              --pack-destination "$GITHUB_WORKSPACE/temp-workspace" \
-              --silent \
-              2>/dev/null)
+              --pack-destination "$GITHUB_WORKSPACE/temp-workspace")
           
             if [ -f "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" ]; then
               mv "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" "$cache_file"
