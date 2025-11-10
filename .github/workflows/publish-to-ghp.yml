@@ -122,7 +122,7 @@ jobs:
           echo "  Packing: $pkg_name@$pkg_version"
 
           # pack without changing directory
-          tgz_file=$(npm pack "$pkg_path" --pack-destination "$GITHUB_WORKSPACE/temp-workspace" | tail -1)
+          tgz_file=$(npm pack "$pkg_path" --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/temp-workspace" | tail -1)
 
           if [ -f "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" ]; then
             mv "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" "$cache_file"
