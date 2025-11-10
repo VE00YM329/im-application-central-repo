@@ -115,6 +115,21 @@ jobs:
             echo "Processing dependency: $pkg_name@$pkg_version"
       
             safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
+
+            # Remove lifecycle scripts from package.json to prevent prepack from running
+            node -e "
+              const fs = require('fs');
+              const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+              const scriptsToRemove = ['prepack', 'postpack', 'prepare', 'prepublish', 'prepublishOnly'];
+              if (pkg.scripts) {
+                scriptsToRemove.forEach(script => {
+                  if (pkg.scripts[script]) {
+                    delete pkg.scripts[script];
+                  }
+                });
+              }
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+            " 2>/dev/null || true
       
             # Pack dependency
             npm config set ignore-scripts true
