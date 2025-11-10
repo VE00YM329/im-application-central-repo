@@ -400,8 +400,7 @@ jobs:
             
             // Set publishConfig
             pkgData.publishConfig = {
-              registry: REGISTRY,
-              access: 'public'
+              registry: REGISTRY
             };
             
             // Clean scripts
@@ -428,7 +427,7 @@ jobs:
             try {
               try {
                 const output = execSync(
-                'npm publish --ignore-scripts --access=public --loglevel=verbose',
+                'npm publish --ignore-scripts --loglevel=verbose',
                 {
                   cwd: pkg.dir,
                   encoding: 'utf8',
