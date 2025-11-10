@@ -75,12 +75,12 @@ jobs:
             "name": "temp-installer",
             "version": "1.0.0",
             "dependencies": {
-              "${{ github.event.inputs.package_name }}": "${{ steps.resolve_version.outputs.resolved_version }}"
+              "${{ github.event.inputs.package_name }}": "${{ process.env.MAIN_VERSION }}"
             }
           }
           EOF
       
-          echo "Installing ${{ github.event.inputs.package_name }}@${{ steps.resolve_version.outputs.resolved_version }} and all dependencies..."
+          echo "Installing ${{ github.event.inputs.package_name }}@${{ process.env.MAIN_VERSION }} and all dependencies..."
           npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
       
           mkdir -p dependency-cache
@@ -132,7 +132,7 @@ jobs:
       
           echo "Packing main package..."
           TARBALL=$(npm pack \
-            ${{ github.event.inputs.package_name }}@${{ steps.resolve_version.outputs.resolved_version }} \
+            ${{ github.event.inputs.package_name }}@${{ process.env.MAIN_VERSION }} \
             --registry=https://registry.npmjs.org/
           )
       
@@ -188,12 +188,15 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
             console.log('Updated package name from', originalName, 'to', pkg.name);
           "
-      
           cd ../../
-      
           echo "Package and all dependencies download
-
-
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          GH_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          MAIN_PACKAGE: ${{ steps.resolve.outputs.package_name }}
+          MAIN_VERSION: ${{ steps.resolve.outputs.resolved_version }}
+          
       - name: Verify Cache
         run: |
           PKG_COUNT=$(ls -1 dependency-cache/*.tgz 2>/dev/null | wc -l)
