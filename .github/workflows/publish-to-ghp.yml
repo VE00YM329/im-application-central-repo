@@ -100,40 +100,33 @@ jobs:
           
           # Pack function
           pack_package() {
-            local pkg_path="$1"
-            
-            if [ ! -f "$pkg_path/package.json" ]; then
-              return 0
-            fi
-            
-            local pkg_name pkg_version safe_name tgz_file
-            pkg_name=$(node -pe "try{require('$pkg_path/package.json').name}catch(e){''}" 2>/dev/null)
-            pkg_version=$(node -pe "try{require('$pkg_path/package.json').version}catch(e){''}" 2>/dev/null)
-            
-            if [ -z "$pkg_name" ] || [ -z "$pkg_version" ]; then
-              return 0
-            fi
+          local pkg_path="$1"
 
-            echo "=== Packing all packages ==="            
-            safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
-            local cache_file="${GITHUB_WORKSPACE}/dependency-cache/${safe_name}-${pkg_version}.tgz"
-            mkdir -p "${GITHUB_WORKSPACE}/dependency-cache"
-            
-            # Skip if already cached
-            if [ -f "$cache_file" ]; then
-              return 0
-            fi
-            
-            echo "  Packing: $pkg_name@$pkg_version"
-            
-            cd "$pkg_path"
-            if npm pack --quiet 2>/dev/null; then
-              tgz_file=$(ls -t *.tgz 2>/dev/null | head -1)
-              if [ -n "$tgz_file" ] && [ -f "$tgz_file" ]; then
-                mv "$tgz_file" "$cache_file" 2>/dev/null || cp "$tgz_file" "$cache_file"
-                rm -f *.tgz 2>/dev/null || true
-              fi
-            fi
+          if [ ! -f "$pkg_path/package.json" ]; then
+           return
+          fi
+
+          local pkg_name pkg_version safe_name tgz_file
+          pkg_name=$(node -pe "require('$pkg_path/package.json').name")
+          pkg_version=$(node -pe "require('$pkg_path/package.json').version")
+
+          safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
+
+          local cache_file="$GITHUB_WORKSPACE/dependency-cache/${safe_name}-${pkg_version}.tgz"
+
+          # skip if exist
+          if [ -f "$cache_file" ]; then
+           return
+          fi
+
+          echo "  Packing: $pkg_name@$pkg_version"
+
+          # pack without changing directory
+          tgz_file=$(npm pack "$pkg_path" --pack-destination "$GITHUB_WORKSPACE/temp-workspace" | tail -1)
+
+          if [ -f "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" ]; then
+            mv "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" "$cache_file"
+          fi
           }
           
           export -f pack_package
