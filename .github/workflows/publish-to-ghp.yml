@@ -75,12 +75,12 @@ jobs:
             "name": "temp-installer",
             "version": "1.0.0",
             "dependencies": {
-              "${{ github.event.inputs.package_name }}": "${{ process.env.MAIN_VERSION }}"
+              "${{ github.event.inputs.package_name }}": "${{ steps.resolve.outputs.resolved_version }}"
             }
           }
           EOF
       
-          echo "Installing ${{ github.event.inputs.package_name }}@${{ process.env.MAIN_VERSION }} and all dependencies..."
+          echo "Installing ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }} and all dependencies..."
           npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
       
           mkdir -p dependency-cache
@@ -131,10 +131,7 @@ jobs:
           cd "${WORKSPACE_ROOT}/../cached-packages"
       
           echo "Packing main package..."
-          TARBALL=$(npm pack \
-            ${{ github.event.inputs.package_name }}@${{ process.env.MAIN_VERSION }} \
-            --registry=https://registry.npmjs.org/
-          )
+          TARBALL=$(npm pack ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }} --registry=https://registry.npmjs.org/)
       
           echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}"
       
