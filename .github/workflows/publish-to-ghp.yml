@@ -186,7 +186,7 @@ jobs:
             console.log('Updated package name from', originalName, 'to', pkg.name);
           "
           cd ../../
-          echo "Package and all dependencies download
+          echo "Package and all dependencies download"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           GH_OWNER: ${{ github.repository_owner }}
