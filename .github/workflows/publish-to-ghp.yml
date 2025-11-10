@@ -126,7 +126,8 @@ jobs:
           fi
 
           echo "  Packing: $pkg_name@$pkg_version"
-
+          NPM_CONFIG_IGNORE_SCRIPTS=true \
+          NPM_CONFIG_SCRIPT_SHELL=/bin/true \
           # pack without changing directory
           tgz_file=$(npm pack "$pkg_path" --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/temp-workspace" | tail -1)
 
