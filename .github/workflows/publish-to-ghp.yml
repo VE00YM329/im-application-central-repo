@@ -63,17 +63,16 @@ jobs:
           key: ${{ steps.resolve.outputs.cache_key }}
           restore-keys: npm-deps-v4-
 
-      - name: Download and Pack Complete Dependency Tree
+      - name: Download and Pack Complete Dependency Tree (Safe Tarball Mode)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -e
-          echo "=== Downloading complete dependency tree from npmjs.org ==="
-          
+          echo "=== Installing ${steps.resolve.outputs.package_name}@${steps.resolve.outputs.resolved_version} from NPM ==="
+      
           mkdir -p dependency-cache temp-workspace
           cd temp-workspace
-          
-          # Create package.json
-          cat > package.json << 'EOF'
+    
+          cat > package.json << EOF
           {
             "name": "dependency-downloader",
             "version": "1.0.0",
@@ -82,123 +81,70 @@ jobs:
             }
           }
           EOF
-
-          npm install -g npmignore
-          
-          
-          # Install ALL dependencies (including transitive)
-          echo "Installing dependencies..."
+      
+          echo "Installing package and all dependencies..."
           npm install \
-            --legacy-peer-deps \
-            --registry=https://registry.npmjs.org/ \
+            --registry=https://registry.npmjs.org \
             --no-audit \
             --no-fund \
-            --loglevel=warn \
             --ignore-scripts
-          
-          # Generate dependency tree for reference
-          npm list --json --all --long > ../dependency-cache/dependency-tree.json 2>/dev/null || true
-          
-          echo ""
-          echo "=== Packing all packages ==="
-          
-          # Pack function
-          pack_package() {
-            local pkg_path="$1"
-            if [ ! -f "$pkg_path/package.json" ]; then
-              return
+    
+          npm list --json --all > ../dependency-cache/dependency-tree.json || true
+      
+          echo "Collecting dependency metadata..."
+      
+          find node_modules -name "package.json" -type f \
+            -exec node -p "(() => {
+              const p = require(process.argv[1]);
+              if (p.name && p.version) console.log(p.name + '@' + p.version);
+            })()" {} \; \
+            | sort -u > ../dependency-cache/dependency-list.txt
+      
+          echo "Dependency count: $(wc -l < ../dependency-cache/dependency-list.txt)"
+      
+          cd ../dependency-cache
+      
+          echo "=== Packing dependencies from official npm registry tarballs ==="
+      
+          while IFS= read -r pkg; do
+            name=$(echo "$pkg" | cut -d@ -f1 | sed 's/@/\@/g')
+            version=$(echo "$pkg" | sed "s/^${name}@//")
+      
+            # safe filename for caching
+            safe=$(echo "$name" | sed 's/[@\/]/_/g')
+      
+            outfile="${safe}-${version}.tgz"
+      
+            if [ -f "$outfile" ]; then
+              echo "✔ Already cached: $outfile"
+              continue
             fi
-          
-            local pkg_name pkg_version safe_name cache_file tgz_file
-            pkg_name=$(node -pe "require('$pkg_path/package.json').name")
-            pkg_version=$(node -pe "require('$pkg_path/package.json').version")
-            safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
-            cache_file="$GITHUB_WORKSPACE/dependency-cache/${safe_name}-${pkg_version}.tgz"
-          
-            if [ -f "$cache_file" ]; then
-              return
+      
+            echo "Packing: $pkg"
+      
+            npm pack "$pkg" \
+              --registry=https://registry.npmjs.org \
+              --silent \
+              --pack-destination . || {
+                echo "Failed to pack $pkg"
+                continue
+              }
+      
+            # npm pack produces <name>-<version>.tgz — rename to safe format
+            tarfile=$(ls ${safe}*.tgz 2>/dev/null | head -1 || true)
+      
+            if [ -z "$tarfile" ]; then
+              echo "Couldn't find generated tarball for $pkg"
+              continue
             fi
-          
-            echo "  Packing: $pkg_name@$pkg_version"
-          
-            # Fully disable lifecycle scripts
-            export npm_config_ignore_scripts=true
-            export NPM_CONFIG_IGNORE_SCRIPTS=true
-            export npm_config_lifecycle=false
-            export npm_lifecycle_event=none
-            export npm_config_prepack=false
-            export npm_config_prepublish=false
-            export npm_config_prepare=false
-          
-            tgz_file=$(npm pack "$pkg_path" \
-              --ignore-scripts \
-              --pack-destination "$GITHUB_WORKSPACE/temp-workspace")
-          
-            if [ -f "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" ]; then
-              mv "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" "$cache_file"
-            fi
-          }
+      
+            mv "$tarfile" "$outfile"
+            echo "Cached: $outfile"
+      
+          done < dependency-list.txt      
+          echo "Total cached packages: $(ls -1 *.tgz 2>/dev/null | wc -l)"
 
-          
-          export -f pack_package
-          
-          # Process all node_modules directories
-          echo "Processing flat node_modules..."
-          if [ -d "node_modules" ]; then
-            cd node_modules
-            
-            # Process unscoped packages
-            for dir in */; do
-              if [ -d "$dir" ] && [ ! "$dir" = "@*/" ]; then
-                pack_package "$PWD/$dir"
-              fi
-            done
-            
-            # Process scoped packages
-            for scope_dir in @*/; do
-              if [ -d "$scope_dir" ]; then
-                for pkg_dir in "$scope_dir"*/; do
-                  if [ -d "$pkg_dir" ]; then
-                    pack_package "$PWD/$pkg_dir"
-                  fi
-                done
-              fi
-            done
-            
-            cd ..
-          fi
-          
-          # Process nested node_modules
-          echo "Searching for nested dependencies..."
-          find node_modules -type d -name "node_modules" -not -path "node_modules" | while read nested; do
-            echo "  Found: $nested"
-            cd "$nested"
-            
-            for dir in */; do
-              if [ -d "$dir" ] && [ ! "$dir" = "@*/" ]; then
-                pack_package "$PWD/$dir"
-              fi
-            done
-            
-            for scope_dir in @*/; do
-              if [ -d "$scope_dir" ]; then
-                for pkg_dir in "$scope_dir"*/; do
-                  if [ -d "$pkg_dir" ]; then
-                    pack_package "$PWD/$pkg_dir"
-                  fi
-                done
-              fi
-            done
-            
-            cd "$WORKSPACE_ROOT"
-          done
-          
-          cd "$WORKSPACE_ROOT"
-          
-          PKG_COUNT=$(ls -1 dependency-cache/*.tgz 2>/dev/null | wc -l)
-          echo ""
-          echo "=== Download complete ==="
-          echo "Total packages cached: $PKG_COUNT"
+
 
       - name: Verify Cache
         run: |
