@@ -104,35 +104,43 @@ jobs:
           
           # Pack function
           pack_package() {
-          local pkg_path="$1"
-
-          if [ ! -f "$pkg_path/package.json" ]; then
-           return
-          fi
-
-          local pkg_name pkg_version safe_name tgz_file
-          pkg_name=$(node -pe "require('$pkg_path/package.json').name")
-          pkg_version=$(node -pe "require('$pkg_path/package.json').version")
-
-          safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
-
-          local cache_file="$GITHUB_WORKSPACE/dependency-cache/${safe_name}-${pkg_version}.tgz"
-
-          # skip if exist
-          if [ -f "$cache_file" ]; then
-           return
-          fi
-
-          echo "  Packing: $pkg_name@$pkg_version"
-          NPM_CONFIG_IGNORE_SCRIPTS=true \
-          NPM_CONFIG_SCRIPT_SHELL=/bin/true \
-          # pack without changing directory
-          tgz_file=$(npm pack "$pkg_path" --ignore-scripts)
-
-          if [ -f "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" ]; then
-            mv "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" "$cache_file"
-          fi
+            local pkg_path="$1"
+            if [ ! -f "$pkg_path/package.json" ]; then
+              return
+            fi
+          
+            local pkg_name pkg_version safe_name cache_file tgz_file
+            pkg_name=$(node -pe "require('$pkg_path/package.json').name")
+            pkg_version=$(node -pe "require('$pkg_path/package.json').version")
+            safe_name=$(echo "$pkg_name" | sed 's/[@\/]/_/g')
+            cache_file="$GITHUB_WORKSPACE/dependency-cache/${safe_name}-${pkg_version}.tgz"
+          
+            if [ -f "$cache_file" ]; then
+              return
+            fi
+          
+            echo "  Packing: $pkg_name@$pkg_version"
+          
+            # Fully disable lifecycle scripts
+            export npm_config_ignore_scripts=true
+            export NPM_CONFIG_IGNORE_SCRIPTS=true
+            export npm_config_lifecycle=false
+            export npm_lifecycle_event=none
+            export npm_config_prepack=false
+            export npm_config_prepublish=false
+            export npm_config_prepare=false
+          
+            tgz_file=$(npm pack "$pkg_path" \
+              --ignore-scripts \
+              --pack-destination "$GITHUB_WORKSPACE/temp-workspace" \
+              --silent \
+              2>/dev/null)
+          
+            if [ -f "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" ]; then
+              mv "$GITHUB_WORKSPACE/temp-workspace/$tgz_file" "$cache_file"
+            fi
           }
+
           
           export -f pack_package
           
