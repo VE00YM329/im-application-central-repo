@@ -82,6 +82,8 @@ jobs:
             }
           }
           EOF
+
+          npm install -g npmignore
           
           
           # Install ALL dependencies (including transitive)
