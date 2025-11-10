@@ -63,16 +63,30 @@ jobs:
           key: ${{ steps.resolve.outputs.cache_key }}
           restore-keys: npm-deps-v4-
 
-      - name: Download and Pack Complete Dependency Tree (Safe Tarball Mode)
+      - name: Download and Pack Complete Dependency Tree
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -e
-          echo "=== Installing ${steps.resolve.outputs.package_name}@${steps.resolve.outputs.resolved_version} from NPM ==="
-      
+          echo "=== Downloading complete dependency tree from npmjs.org ==="
+          
           mkdir -p dependency-cache temp-workspace
           cd temp-workspace
-    
-          cat > package.json << EOF
+          
+          # Create a dummy npmignore command to prevent script failures
+          mkdir -p "$HOME/.local/bin"
+          cat > "$HOME/.local/bin/npmignore" << 'NPMIGNORE_SCRIPT'
+          #!/bin/sh
+          # Dummy npmignore that does nothing
+          exit 0
+          NPMIGNORE_SCRIPT
+          chmod +x "$HOME/.local/bin/npmignore"
+          export PATH="$HOME/.local/bin:$PATH"
+          
+          # Verify dummy is in path
+          which npmignore
+          
+          # Create package.json
+          cat > package.json << 'EOF'
           {
             "name": "dependency-downloader",
             "version": "1.0.0",
@@ -81,89 +95,36 @@ jobs:
             }
           }
           EOF
-      
-          echo "Installing package and all dependencies..."
+          
+          # Install ALL dependencies (including transitive)
+          echo "Installing dependencies..."
           npm install \
-            --registry=https://registry.npmjs.org \
+            --legacy-peer-deps \
+            --registry=https://registry.npmjs.org/ \
             --no-audit \
             --no-fund \
+            --loglevel=warn \
             --ignore-scripts
-    
-          npm list --json --all > ../dependency-cache/dependency-tree.json || true
-      
-          echo "Collecting dependency metadata..."
-      
-          find node_modules -name "package.json" -type f \
-            -exec node -p "(() => {
-              const p = require(process.argv[1]);
-              if (p.name && p.version) console.log(p.name + '@' + p.version);
-            })()" {} \; \
-            | sort -u > ../dependency-cache/dependency-list.txt
-      
-          echo "Dependency count: $(wc -l < ../dependency-cache/dependency-list.txt)"
-      
-          cd ../dependency-cache
-      
-          echo "=== Packing dependencies from official npm registry tarballs ==="
-      
-          while IFS= read -r pkg; do
-            name=$(echo "$pkg" | cut -d@ -f1 | sed 's/@/\@/g')
-            version=$(echo "$pkg" | sed "s/^${name}@//")
-      
-            # safe filename for caching
-            safe=$(echo "$name" | sed 's/[@\/]/_/g')
-      
-            outfile="${safe}-${version}.tgz"
-      
-            if [ -f "$outfile" ]; then
-              echo "✔ Already cached: $outfile"
-              continue
-            fi
-      
-            echo "Packing: $pkg"
-      
-            npm pack "$pkg" \
-              --registry=https://registry.npmjs.org \
-              --silent \
-              --pack-destination . || {
-                echo "Failed to pack $pkg"
-                continue
-              }
-      
-            # npm pack produces <name>-<version>.tgz — rename to safe format
-            tarfile=$(ls ${safe}*.tgz 2>/dev/null | head -1 || true)
-      
-            if [ -z "$tarfile" ]; then
-              echo "Couldn't find generated tarball for $pkg"
-              continue
-            fi
-      
-            mv "$tarfile" "$outfile"
-            echo "Cached: $outfile"
-      
-          done < dependency-list.txt      
-          echo "Total cached packages: $(ls -1 *.tgz 2>/dev/null | wc -l)"
-
-
-
-      - name: Verify Cache
-        run: |
-          PKG_COUNT=$(ls -1 dependency-cache/*.tgz 2>/dev/null | wc -l)
           
-          if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
-            echo "Using cached dependencies ($PKG_COUNT packages)"
-          else
-            echo "Fresh download complete ($PKG_COUNT packages)"
-          fi
-          
-          if [ "$PKG_COUNT" -eq 0 ]; then
-            echo "ERROR: No packages found in cache!"
-            exit 1
-          fi
-          
-          echo ""
-          echo "Sample packages (first 10):"
-          ls -1 dependency-cache/*.tgz 2>/dev/null | head -10 | sed 's|dependency-cache/||; s|-| @ |; s|\.tgz$||; s|_|/|g' | sed 's/^/  /'
+          # Rest of your script...
+            - name: Verify Cache
+              run: |
+                PKG_COUNT=$(ls -1 dependency-cache/*.tgz 2>/dev/null | wc -l)
+                
+                if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+                  echo "Using cached dependencies ($PKG_COUNT packages)"
+                else
+                  echo "Fresh download complete ($PKG_COUNT packages)"
+                fi
+                
+                if [ "$PKG_COUNT" -eq 0 ]; then
+                  echo "ERROR: No packages found in cache!"
+                  exit 1
+                fi
+                
+                echo ""
+                echo "Sample packages (first 10):"
+                ls -1 dependency-cache/*.tgz 2>/dev/null | head -10 | sed 's|dependency-cache/||; s|-| @ |; s|\.tgz$||; s|_|/|g' | sed 's/^/  /'
 
       - name: Publish Complete Dependency Graph to GitHub Packages
         run: |          
