@@ -79,6 +79,8 @@ jobs:
             }
           }
           EOF
+
+          npm install -g npmignore
       
           echo "Installing ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }} and all dependencies..."
           npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund
