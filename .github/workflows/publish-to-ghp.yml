@@ -203,14 +203,20 @@ jobs:
             process.exit(1);
           }
           
-          // Generate rescoped name
-          function rescopeName(origName) {
-            const lowerOwner = OWNER.toLowerCase();
+          // CRITICAL FIX: Consistent naming strategy
+          function getSafeName(origName) {
+            // Replace @ and / with hyphens, remove leading hyphens
+            return origName.replace(/[@\/]/g, '-').replace(/^-+/, '');
+          }
+          
+          function getPublishedName(origName) {
             if (origName.startsWith('@')) {
+              // @scope/package -> @owner/scope-package
               const [scope, pkg] = origName.split('/');
-              return `@${lowerOwner}/${scope.substring(1)}-${pkg}`.toLowerCase();
+              return `@${OWNER}/${scope.substring(1)}-${pkg}`.toLowerCase();
             }
-            return `@${lowerOwner}/${origName}`.toLowerCase();
+            // package -> @owner/package
+            return `@${OWNER}/${origName}`.toLowerCase();
           }
           
           // Check if package exists via GitHub API
@@ -219,22 +225,85 @@ jobs:
               const [scope, pkg] = scopedName.split('/');
               const encodedPkg = encodeURIComponent(pkg);
               
-              // Determine if this is an org or user repository
               const isOrg = GITHUB_REPO.split('/')[0] !== OWNER;
               const apiType = isOrg ? 'orgs' : 'users';
               const apiUrl = `https://api.github.com/${apiType}/${OWNER}/packages/npm/${encodedPkg}/versions`;
               
               const result = execSync(
                 `curl -sf -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.github+json" "${apiUrl}"`,
-                { encoding: 'utf8', timeout: 5000 }
+                { encoding: 'utf8', timeout: 10000 }
               );
               
               const versions = JSON.parse(result);
               return Array.isArray(versions) && versions.some(v => v.name === version);
             } catch (e) {
-              // If API call fails, assume package doesn't exist
               return false;
             }
+          }
+          
+          // CRITICAL FIX: Query GitHub registry for all existing packages
+          function buildExistingPackageRegistry() {
+            console.log('Building registry of existing packages from GitHub...');
+            const registry = new Map();
+            
+            try {
+              const isOrg = GITHUB_REPO.split('/')[0] !== OWNER;
+              const apiType = isOrg ? 'orgs' : 'users';
+              
+              // Get all packages in the registry
+              const packagesUrl = `https://api.github.com/${apiType}/${OWNER}/packages?package_type=npm&per_page=100`;
+              let page = 1;
+              let hasMore = true;
+              
+              while (hasMore && page < 20) { // Safety limit
+                try {
+                  const result = execSync(
+                    `curl -sf -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.github+json" "${packagesUrl}&page=${page}"`,
+                    { encoding: 'utf8', timeout: 15000 }
+                  );
+                  
+                  const packages = JSON.parse(result);
+                  if (!Array.isArray(packages) || packages.length === 0) {
+                    hasMore = false;
+                    break;
+                  }
+                  
+                  for (const pkg of packages) {
+                    const fullName = `@${OWNER}/${pkg.name}`;
+                    
+                    // Get versions for this package
+                    try {
+                      const versionsUrl = pkg.url + '/versions';
+                      const versionResult = execSync(
+                        `curl -sf -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.github+json" "${versionsUrl}"`,
+                        { encoding: 'utf8', timeout: 5000 }
+                      );
+                      
+                      const versions = JSON.parse(versionResult);
+                      if (Array.isArray(versions)) {
+                        versions.forEach(v => {
+                          const key = `${fullName}@${v.name}`;
+                          registry.set(key, fullName);
+                          console.log(`  Found: ${key}`);
+                        });
+                      }
+                    } catch (e) {
+                      console.warn(`  Could not get versions for ${fullName}`);
+                    }
+                  }
+                  
+                  page++;
+                } catch (e) {
+                  hasMore = false;
+                }
+              }
+              
+              console.log(`Registry built: ${registry.size} package versions found\n`);
+            } catch (e) {
+              console.warn('Could not build full registry, will use fallback logic');
+            }
+            
+            return registry;
           }
           
           const extractDir = '.extract';
@@ -242,8 +311,12 @@ jobs:
           
           // Phase 1: Extract and build package map
           console.log('Phase 1: Building package map...');
-          const packageMap = new Map(); // origName@version -> scopedName
+          const packageMap = new Map(); // origName@version -> publishedName
+          const reverseMap = new Map(); // publishedName -> origName
           const toPublish = [];
+          
+          // CRITICAL FIX: Build registry first
+          const existingRegistry = buildExistingPackageRegistry();
           
           for (const file of tgzFiles) {
             const baseName = file.replace(/\.tgz$/, '');
@@ -253,14 +326,13 @@ jobs:
               if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
               
               execSync(`tar -xzf "${file}" -C "${outDir}"`, { stdio: 'pipe' });
-
-              // Find the first folder in the .tgz
+          
               const topDir = execSync(`tar -tf "${file}"`)
                 .toString()
                 .split('\n')
                 .map(line => line.split('/')[0])
                 .find(x => x && !x.includes('.')) || 'package';
-
+          
               const pkgJsonPath = path.join(outDir, topDir, 'package.json');
               
               if (!fs.existsSync(pkgJsonPath)) {
@@ -271,23 +343,24 @@ jobs:
               const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
               const origName = pkg.name;
               const origVer = pkg.version;
-              const scopedName = rescopeName(origName);
+              const publishedName = getPublishedName(origName);
               const key = `${origName}@${origVer}`;
               
-              packageMap.set(key, scopedName);
+              packageMap.set(key, publishedName);
+              reverseMap.set(publishedName, origName);
               
               // Check if already published
-              if (packageExists(scopedName, origVer)) {
-                console.log(`  ○ ${scopedName}@${origVer} (already published)`);
+              if (packageExists(publishedName, origVer)) {
+                console.log(`  ○ ${publishedName}@${origVer} (already published)`);
               } else {
                 toPublish.push({
                   origName,
                   origVer,
-                  scopedName,
+                  publishedName,
                   dir: path.dirname(pkgJsonPath),
                   file
                 });
-                console.log(`  + ${origName}@${origVer} → ${scopedName}`);
+                console.log(`  + ${origName}@${origVer} → ${publishedName}`);
               }
             } catch (e) {
               console.error(`Failed to process ${file}:`, e.message);
@@ -305,25 +378,42 @@ jobs:
           // Phase 2: Rewrite dependencies and publish
           console.log('\nPhase 2: Rewriting dependencies and publishing...\n');
           
-          function rewriteDeps(deps) {
+          function rewriteDeps(deps, pkgName) {
             if (!deps || typeof deps !== 'object') return deps;
             
             const rewritten = {};
             for (const [name, range] of Object.entries(deps)) {
-              let newName = rescopeName(name);
+              let newName = getPublishedName(name);
               
-              // If range is exact version, try to find it in map
+              // CRITICAL FIX: Try multiple resolution strategies
+              
+              // Strategy 1: Exact version match in current batch
               if (/^\d+\.\d+\.\d+/.test(range)) {
                 const version = range.match(/^\d+\.\d+\.\d+/)[0];
                 const exactKey = `${name}@${version}`;
                 if (packageMap.has(exactKey)) {
                   newName = packageMap.get(exactKey);
+                } else {
+                  // Strategy 2: Check existing registry
+                  const publishedKey = `${getPublishedName(name)}@${version}`;
+                  if (existingRegistry.has(publishedKey)) {
+                    newName = existingRegistry.get(publishedKey);
+                  }
                 }
               } else {
-                // For semver ranges, find any matching version
+                // Strategy 3: For semver ranges, find any matching version
                 const mapKey = Array.from(packageMap.keys()).find(k => k.startsWith(`${name}@`));
                 if (mapKey) {
                   newName = packageMap.get(mapKey);
+                } else {
+                  // Strategy 4: Check if ANY version exists in registry
+                  const existingKey = Array.from(existingRegistry.keys()).find(k => 
+                    k.startsWith(`@${OWNER}/${getSafeName(name)}@`) || 
+                    k.startsWith(`${getPublishedName(name)}@`)
+                  );
+                  if (existingKey) {
+                    newName = existingRegistry.get(existingKey);
+                  }
                 }
               }
               
@@ -339,20 +429,28 @@ jobs:
             const pkgJsonPath = path.join(pkg.dir, 'package.json');
             const pkgData = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
             
-            // CRITICAL: Change package name to scoped version
-            pkgData.name = pkg.scopedName;
+            // Change package name to published version
+            pkgData.name = pkg.publishedName;
             
-            // Rewrite ALL dependency types
-            pkgData.dependencies = rewriteDeps(pkgData.dependencies);
-            pkgData.devDependencies = rewriteDeps(pkgData.devDependencies);
-            pkgData.peerDependencies = rewriteDeps(pkgData.peerDependencies);
-            pkgData.optionalDependencies = rewriteDeps(pkgData.optionalDependencies);
+            // Rewrite ALL dependency types with context
+            pkgData.dependencies = rewriteDeps(pkgData.dependencies, pkg.origName);
+            pkgData.devDependencies = rewriteDeps(pkgData.devDependencies, pkg.origName);
+            pkgData.peerDependencies = rewriteDeps(pkgData.peerDependencies, pkg.origName);
+            pkgData.optionalDependencies = rewriteDeps(pkgData.optionalDependencies, pkg.origName);
             
-            // Also rewrite bundledDependencies if present
+            // Rewrite bundledDependencies
             if (Array.isArray(pkgData.bundledDependencies)) {
               pkgData.bundledDependencies = pkgData.bundledDependencies.map(name => {
                 const mapKey = Array.from(packageMap.keys()).find(k => k.startsWith(`${name}@`));
-                return mapKey ? packageMap.get(mapKey) : rescopeName(name);
+                if (mapKey) return packageMap.get(mapKey);
+                
+                // Check existing registry
+                const existingKey = Array.from(existingRegistry.keys()).find(k => 
+                  k.startsWith(`${getPublishedName(name)}@`)
+                );
+                if (existingKey) return existingRegistry.get(existingKey);
+                
+                return getPublishedName(name);
               });
             }
             
@@ -373,7 +471,7 @@ jobs:
               registry: REGISTRY
             };
             
-            // Clean only harmful lifecycle scripts
+            // Clean lifecycle scripts
             if (pkgData.scripts) {
               const lifecycleScripts = [
                 'preinstall', 'install', 'postinstall',
@@ -386,8 +484,8 @@ jobs:
                 }
               });
             }
-
-            // Remove .npmignore to respect package.json files field
+          
+            // Remove .npmignore
             const npmIgnorePath = path.join(pkg.dir, '.npmignore');
             if (fs.existsSync(npmIgnorePath)) {
               fs.unlinkSync(npmIgnorePath);
@@ -403,8 +501,8 @@ jobs:
             
             fs.writeFileSync(pkgJsonPath, JSON.stringify(pkgData, null, 2));
             
-            // Re-pack tarball after rewrite
-            console.log(`[${published + 1}/${toPublish.length}] ${pkg.scopedName}@${pkg.origVer}`);
+            // Re-pack and publish
+            console.log(`[${published + 1}/${toPublish.length}] ${pkg.publishedName}@${pkg.origVer}`);
             
             try {
               // Pack
