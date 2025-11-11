@@ -24,7 +24,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '16.13.2'
+          node-version: '20.x'
           registry-url: 'https://npm.pkg.github.com'
           scope: '@${{ github.repository_owner }}'
 
@@ -55,6 +55,13 @@ jobs:
           echo "Package: $PKG_NAME@$RESOLVED_VERSION"
           echo "Cache Key: $CACHE_KEY"
 
+      - name: Sanitize Package Name
+        id: sanitize_name
+        run: |
+          SANITIZED=$(echo "${{ github.event.inputs.package_name }}" | sed 's/[@\/]/-/g; s/^-*//')
+          echo "sanitized_name=$SANITIZED" >> $GITHUB_OUTPUT
+          echo "Sanitized name: $SANITIZED"
+
       - name: Cache Dependencies
         id: cache
         uses: actions/cache@v4
@@ -64,11 +71,11 @@ jobs:
           restore-keys: npm-deps-v4-
 
       - name: Download Package and All Dependencies from NPM
-        if: steps.cache_package.outputs.cache-hit != 'true'
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           echo "Cache miss - downloading package and all dependencies from NPM registry"
       
-          mkdir -p cached-packages dependency-cache temp-workspace
+          mkdir -p dependency-cache temp-workspace
           cd temp-workspace
           cat > package.json << EOF
           {
@@ -79,13 +86,10 @@ jobs:
             }
           }
           EOF
-
-          npm install -g npmignore
       
           echo "Installing ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }} and all dependencies..."
           npm install --registry=https://registry.npmjs.org/ --no-audit --no-fund --ignore-scripts
       
-          mkdir -p dependency-cache
           echo "Generating dependency list..."
           npm list --json --all > ../dependency-cache/dependency-tree.json
       
@@ -94,7 +98,7 @@ jobs:
           cd node_modules
       
           # List all package.json files
-          find . -name "package.json" -type f > ../dependency-cache/package-list.txt
+          find . -name "package.json" -type f > "$WORKSPACE_ROOT/../dependency-cache/package-list.txt"
       
           while IFS= read -r pkg_json; do
             pkg_dir=$(dirname "$pkg_json")
@@ -104,13 +108,6 @@ jobs:
             # Get package info
             pkg_name=$(node -p "require('./package.json').name" 2>/dev/null) || continue
             pkg_version=$(node -p "require('./package.json').version" 2>/dev/null) || continue
-      
-            # Skip main package
-            if [ "$pkg_name" = "${{ github.event.inputs.package_name }}" ]; then
-              echo "Skipping main package: $pkg_name@$pkg_version (handled separately)"
-              cd "$original_dir"
-              continue
-            fi
       
             echo "Processing dependency: $pkg_name@$pkg_version"
       
@@ -136,7 +133,7 @@ jobs:
             if npm pack --ignore-scripts --loglevel=error 2>/dev/null; then
               tgz_file=$(ls *.tgz 2>/dev/null | head -1)
               if [ -n "$tgz_file" ]; then
-                mv "$tgz_file" "${WORKSPACE_ROOT}/../dependency-cache/${safe_name}-${pkg_version}.tgz"
+                mv "$tgz_file" "$WORKSPACE_ROOT/../dependency-cache/${safe_name}-${pkg_version}.tgz"
                 echo "Cached: ${safe_name}-${pkg_version}.tgz"
               fi
             else
@@ -144,73 +141,24 @@ jobs:
             fi
       
             cd "$original_dir"
-          done < ../dependency-cache/package-list.txt
+          done < "$WORKSPACE_ROOT/../dependency-cache/package-list.txt"
       
-          cd "${WORKSPACE_ROOT}/../cached-packages"
-      
-          echo "Packing main package..."
-          TARBALL=$(npm pack ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }} --registry=https://registry.npmjs.org/ --ignore-scripts)
-      
-          echo "Extracting tarball: $TARBALL, for package: ${{ steps.sanitize_name.outputs.sanitized_name }}"
-      
-          EXTRACT_DIR="extract-$(date +%s)"
-          mkdir "$EXTRACT_DIR"
-      
-          # Extract tarball
-          tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
-      
-          # Detect extracted folder
-          PKG_DIR=$(find "$EXTRACT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
-          echo "Detected extracted package directory: $PKG_DIR"
-          cd "$PKG_DIR"
-      
-          cp package.json package.json.backup
-      
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            const originalName = pkg.name;
-      
-            pkg.name = '@${{ github.repository_owner }}/'.toLowerCase() +
-                       '${{ steps.sanitize_name.outputs.sanitized_name }}'.toLowerCase();
-      
-            pkg.publishConfig = { registry: 'https://npm.pkg.github.com' };
-      
-            if (!pkg.repository) {
-              pkg.repository = {
-                type: 'git',
-                url: 'git+https://github.com/${{ github.repository }}.git'
-              };
-            }
-      
-            if (pkg.scripts) {
-              const scriptsToRemove = ['test', 'prepublishOnly', 'prepack', 'postpack', 'prepare'];
-              scriptsToRemove.forEach(script => {
-                if (pkg.scripts[script]) {
-                  console.log('Removing script:', script);
-                  delete pkg.scripts[script];
-                }
-              });
-      
-              Object.keys(pkg.scripts).forEach(scriptName => {
-                if (scriptName.includes('test') || scriptName.includes('build')) {
-                  console.log('Removing potentially problematic script:', scriptName);
-                  delete pkg.scripts[scriptName];
-                }
-              });
-            }
-      
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-            console.log('Updated package name from', originalName, 'to', pkg.name);
-          "
-          cd ../../
-          echo "Package and all dependencies download"
+          # Return to root and pack main package directly to dependency-cache
+          cd "$WORKSPACE_ROOT/.."
+          
+          echo "Packing main package ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }}..."
+          TARBALL=$(npm pack ${{ github.event.inputs.package_name }}@${{ steps.resolve.outputs.resolved_version }} \
+            --registry=https://registry.npmjs.org/ \
+            --ignore-scripts)
+          
+          # Move main package tarball to dependency-cache
+          safe_main_name=$(echo "${{ github.event.inputs.package_name }}" | sed 's/[@\/]/_/g')
+          mv "$TARBALL" "dependency-cache/${safe_main_name}-${{ steps.resolve.outputs.resolved_version }}.tgz"
+          
+          echo "Main package cached: ${safe_main_name}-${{ steps.resolve.outputs.resolved_version }}.tgz"
+          echo "Package and all dependencies downloaded and cached"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          GH_OWNER: ${{ github.repository_owner }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          MAIN_PACKAGE: ${{ steps.resolve.outputs.package_name }}
-          MAIN_VERSION: ${{ steps.resolve.outputs.resolved_version }}
           
       - name: Verify Cache
         run: |
@@ -229,7 +177,11 @@ jobs:
           
           echo ""
           echo "Sample packages (first 10):"
-          ls -1 dependency-cache/*.tgz 2>/dev/null | head -10 | sed 's|dependency-cache/||; s|-| @ |; s|\.tgz$||; s|_|/|g' | sed 's/^/  /'
+          ls -1 dependency-cache/*.tgz 2>/dev/null | head -10 | \
+            sed 's|dependency-cache/||' | \
+            sed 's|\.tgz$||' | \
+            sed 's|^\([^_]*\)_\([^-]*\)-|\1/\2@|' | \
+            sed 's/^/  /'
 
       - name: Publish Complete Dependency Graph to GitHub Packages
         run: |          
@@ -245,9 +197,11 @@ jobs:
           const REGISTRY = 'https://npm.pkg.github.com';
           const MAIN_PKG = process.env.MAIN_PACKAGE;
           const MAIN_VER = process.env.MAIN_VERSION;
+          const GITHUB_REPO = process.env.GITHUB_REPOSITORY;
           
           console.log(`Owner: @${OWNER}`);
-          console.log(`Main package: ${MAIN_PKG}@${MAIN_VER}\n`);
+          console.log(`Main package: ${MAIN_PKG}@${MAIN_VER}`);
+          console.log(`Repository: ${GITHUB_REPO}\n`);
           
           const tgzFiles = fs.readdirSync('.').filter(f => f.endsWith('.tgz'));
           console.log(`Found ${tgzFiles.length} packages\n`);
@@ -272,16 +226,21 @@ jobs:
             try {
               const [scope, pkg] = scopedName.split('/');
               const encodedPkg = encodeURIComponent(pkg);
-              const apiUrl = `https://api.github.com/users/${OWNER}/packages/npm/${encodedPkg}/versions`;
+              
+              // Determine if this is an org or user repository
+              const isOrg = GITHUB_REPO.split('/')[0] !== OWNER;
+              const apiType = isOrg ? 'orgs' : 'users';
+              const apiUrl = `https://api.github.com/${apiType}/${OWNER}/packages/npm/${encodedPkg}/versions`;
               
               const result = execSync(
                 `curl -sf -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.github+json" "${apiUrl}"`,
-                { encoding: 'utf8', timeout: 15000 }
+                { encoding: 'utf8', timeout: 5000 }
               );
               
               const versions = JSON.parse(result);
               return Array.isArray(versions) && versions.some(v => v.name === version);
             } catch (e) {
+              // If API call fails, assume package doesn't exist
               return false;
             }
           }
@@ -303,7 +262,7 @@ jobs:
               
               execSync(`tar -xzf "${file}" -C "${outDir}"`, { stdio: 'pipe' });
 
-                // Find the first folder in the .tgz
+              // Find the first folder in the .tgz
               const topDir = execSync(`tar -tf "${file}"`)
                 .toString()
                 .split('\n')
@@ -313,10 +272,9 @@ jobs:
               const pkgJsonPath = path.join(outDir, topDir, 'package.json');
               
               if (!fs.existsSync(pkgJsonPath)) {
-                console.warn(`  Warning: No package.json in ${file}`);
+                console.warn(`Warning: No package.json in ${file}`);
                 continue;
               }
-
               
               const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
               const origName = pkg.name;
@@ -328,7 +286,7 @@ jobs:
               
               // Check if already published
               if (packageExists(scopedName, origVer)) {
-                console.log(`${scopedName}@${origVer} (already published)`);
+                console.log(`  ○ ${scopedName}@${origVer} (already published)`);
               } else {
                 toPublish.push({
                   origName,
@@ -337,7 +295,7 @@ jobs:
                   dir: path.dirname(pkgJsonPath),
                   file
                 });
-                console.log(`${origName}@${origVer} → ${scopedName}`);
+                console.log(`  + ${origName}@${origVer} → ${scopedName}`);
               }
             } catch (e) {
               console.error(`Failed to process ${file}:`, e.message);
@@ -345,9 +303,10 @@ jobs:
           }
           
           console.log(`\nPackages to publish: ${toPublish.length}`);
+          console.log(`Already published: ${tgzFiles.length - toPublish.length}`);
           
           if (toPublish.length === 0) {
-            console.log('\nAll packages already published!');
+            console.log('\n✓ All packages already published!');
             process.exit(0);
           }
           
@@ -359,9 +318,23 @@ jobs:
             
             const rewritten = {};
             for (const [name, range] of Object.entries(deps)) {
-              // Find matching package in our map
-              const mapKey = Array.from(packageMap.keys()).find(k => k.startsWith(`${name}@`));
-              const newName = mapKey ? packageMap.get(mapKey) : rescopeName(name);
+              let newName = rescopeName(name);
+              
+              // If range is exact version, try to find it in map
+              if (/^\d+\.\d+\.\d+/.test(range)) {
+                const version = range.match(/^\d+\.\d+\.\d+/)[0];
+                const exactKey = `${name}@${version}`;
+                if (packageMap.has(exactKey)) {
+                  newName = packageMap.get(exactKey);
+                }
+              } else {
+                // For semver ranges, find any matching version
+                const mapKey = Array.from(packageMap.keys()).find(k => k.startsWith(`${name}@`));
+                if (mapKey) {
+                  newName = packageMap.get(mapKey);
+                }
+              }
+              
               rewritten[newName] = range;
             }
             return rewritten;
@@ -408,50 +381,49 @@ jobs:
               registry: REGISTRY
             };
             
-            // Clean scripts
+            // Clean only harmful lifecycle scripts
             if (pkgData.scripts) {
-              const toRemove = Object.keys(pkgData.scripts).filter(k => 
-                /pre|post|install|prepare|test|build/i.test(k)
-              );
-              toRemove.forEach(k => delete pkgData.scripts[k]);
+              const lifecycleScripts = [
+                'preinstall', 'install', 'postinstall',
+                'prepack', 'postpack', 
+                'prepare', 'prepublish', 'prepublishOnly', 'postpublish'
+              ];
+              lifecycleScripts.forEach(script => {
+                if (pkgData.scripts[script]) {
+                  delete pkgData.scripts[script];
+                }
+              });
             }
 
+            // Remove .npmignore to respect package.json files field
             const npmIgnorePath = path.join(pkg.dir, '.npmignore');
             if (fs.existsSync(npmIgnorePath)) {
               fs.unlinkSync(npmIgnorePath);
-            }
-            
-            if (pkgData.files) {
-              delete pkgData.files;
             }
             
             // Add repository
             if (!pkgData.repository) {
               pkgData.repository = {
                 type: 'git',
-                url: `git+https://github.com/${process.env.GITHUB_REPOSITORY}.git`
+                url: `git+https://github.com/${GITHUB_REPO}.git`
               };
             }
             
             fs.writeFileSync(pkgJsonPath, JSON.stringify(pkgData, null, 2));
             
-            // Fix #4 — Re-pack tarball after rewrite
-            console.log(`Repacking tarball for ${pkg.scopedName}@${pkg.origVer} ...`);
-            const newTgz = execSync(
-              'npm pack --ignore-scripts',
-              { cwd: pkg.dir, encoding: 'utf8' }
-            ).trim();
-            
-            // Absolute path to new tarball
-            const tarballPath = path.join(pkg.dir, newTgz);
-            
-            // Publish
-            console.log(`Publishing: ${pkg.scopedName}@${pkg.origVer}`);
+            // Re-pack tarball after rewrite
+            console.log(`[${published + 1}/${toPublish.length}] ${pkg.scopedName}@${pkg.origVer}`);
             
             try {
-              try {
-                const output = execSync(
-                'npm publish --ignore-scripts --loglevel=verbose',
+              // Pack
+              execSync('npm pack --ignore-scripts', { 
+                cwd: pkg.dir, 
+                stdio: 'pipe'
+              });
+              
+              // Publish
+              execSync(
+                'npm publish --ignore-scripts --loglevel=error',
                 {
                   cwd: pkg.dir,
                   encoding: 'utf8',
@@ -462,37 +434,29 @@ jobs:
                   }
                 }
               );
-              if (!packageExists(pkg.scopedName, pkg.origVer)) {
-                console.error(`NOT indexed by GitHub: ${pkg.scopedName}`)
-              }
-
-              console.log(output);
-              console.log(`Published OK\n`);
-            } catch (e) {
-              console.log("\n PUBLISH ERROR DUMP\n");
-              console.log(e.stdout?.toString() || '');
-              console.log(e.stderr?.toString() || '');
-              console.log("\n");
-              throw e;
-            }
-
-              console.log(`Published\n`);
+              
+              console.log(`Published successfully\n`);
               published++;
             } catch (e) {
-              const err = e.message || e.toString();
-              if (err.includes('409') || err.includes('Cannot publish over existing')) {
-                console.log(`Already exists\n`);
+              const errMsg = e.stderr?.toString() || e.message || '';
+              
+              if (errMsg.includes('409') || errMsg.includes('Cannot publish over existing')) {
+                console.log(`Already exists (conflict)\n`);
               } else {
-                console.error(`Error: ${err.substring(0, 200)}\n`);
+                console.error(`Failed to publish`);
+                console.error(`${errMsg.substring(0, 300)}\n`);
                 errors++;
               }
             }
           }
           
-          console.log('=== Summary ===');
-          console.log(`Published: ${published}`);
-          console.log(`Errors: ${errors}`);
-          console.log(`Already existed: ${tgzFiles.length - toPublish.length}`);
+          console.log('='.repeat(50));
+          console.log('Summary:');
+          console.log(`  Published: ${published}`);
+          console.log(`  Errors: ${errors}`);
+          console.log(`  Already existed: ${tgzFiles.length - toPublish.length}`);
+          console.log(`  Total packages: ${tgzFiles.length}`);
+          console.log('='.repeat(50));
           
           if (errors > 0) {
             console.log('\nSome packages failed to publish');
