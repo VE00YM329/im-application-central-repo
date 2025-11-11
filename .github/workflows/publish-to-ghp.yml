@@ -62,16 +62,8 @@ jobs:
           echo "sanitized_name=$SANITIZED" >> $GITHUB_OUTPUT
           echo "Sanitized name: $SANITIZED"
 
-      - name: Cache Dependencies
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: ./dependency-cache
-          key: ${{ steps.resolve.outputs.cache_key }}
-          restore-keys: npm-deps-v4-
 
       - name: Download Package and All Dependencies from NPM
-        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           echo "Cache miss - downloading package and all dependencies from NPM registry"
       
