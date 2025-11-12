@@ -100,7 +100,7 @@ jobs:
           
           console.log(`Found ${deps.length} unique dependencies`);
           fs.writeFileSync('deps.json', JSON.stringify(deps, null, 2));
-          console.log(`Dependencies retrieved: ${JSON.stringify(deps, null, 2)});
+          console.log(`Dependencies retrieved: ${JSON.stringify(deps, null, 2)}`);
           EOF
           
           node parse_deps.js
