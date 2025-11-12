@@ -173,6 +173,10 @@ jobs:
         run: |
           OWNER="${{ github.repository_owner }}"
           
+          # Check available disk space
+          echo "Available disk space:"
+          df -h .
+          
           cat > process_all.js << 'EOF'
           const fs = require('fs');
           const { execSync } = require('child_process');
@@ -216,6 +220,9 @@ jobs:
           
           console.log(`\nProcessing ${deps.length} packages...`);
           
+          // Create a base working directory
+          const workDir = process.cwd();
+          
           for (let i = 0; i < deps.length; i++) {
             const dep = deps[i];
             const { name, version } = dep;
@@ -229,11 +236,21 @@ jobs:
               continue;
             }
             
+            const tempDir = `temp-${i}`;
+            
             try {
+              // Ensure we're in the base directory
+              process.chdir(workDir);
+              
+              // Clean up any existing temp directory
+              try {
+                execSync(`rm -rf ${tempDir}`, { stdio: 'pipe' });
+              } catch {}
+              
               // Download package
               console.log('  Downloading...');
-              execSync(`mkdir -p temp-${i}`, { stdio: 'pipe' });
-              process.chdir(`temp-${i}`);
+              execSync(`mkdir -p ${tempDir}`, { stdio: 'pipe' });
+              process.chdir(tempDir);
               
               const tarball = execSync(
                 `npm pack "${name}@${version}" --registry=https://registry.npmjs.org/`,
@@ -247,8 +264,10 @@ jobs:
               // Extract
               execSync(`mkdir -p extracted && tar -xzf "${tarball}" -C extracted`, { stdio: 'pipe' });
               
+              // Move contents from package subdirectory if it exists
               if (fs.existsSync('extracted/package')) {
-                execSync('mv extracted/package/* extracted/ && rm -rf extracted/package', { stdio: 'pipe' });
+                execSync('mv extracted/package/* extracted/package/.* extracted/ 2>/dev/null || true', { stdio: 'pipe' });
+                execSync('rm -rf extracted/package', { stdio: 'pipe' });
               }
               
               process.chdir('extracted');
@@ -306,30 +325,70 @@ jobs:
                 lifecycleScripts.forEach(script => delete pkg.scripts[script]);
               }
               
+              // Fix repository field - ensure it's an object
+              if (pkg.repository && typeof pkg.repository === 'string') {
+                pkg.repository = {
+                  type: 'git',
+                  url: pkg.repository.startsWith('git+') ? pkg.repository : `git+${pkg.repository}`
+                };
+              } else if (!pkg.repository) {
+                pkg.repository = {
+                  type: 'git',
+                  url: `git+https://github.com/${{ github.repository }}.git`
+                };
+              } else if (pkg.repository && typeof pkg.repository === 'object' && pkg.repository.url) {
+                // Ensure URL has git+ prefix
+                if (!pkg.repository.url.startsWith('git+')) {
+                  pkg.repository.url = `git+${pkg.repository.url}`;
+                }
+              }
+              
               fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
               
               // Publish
               console.log('  Publishing...');
-              execSync('npm publish --ignore-scripts', { 
-                stdio: 'pipe',
-                env: { ...process.env, NODE_AUTH_TOKEN: process.env.GITHUB_TOKEN }
-              });
-              
-              console.log('  ✓ Published successfully');
-              stats.published++;
-              
-              // Add to registry for subsequent packages
-              publishedRegistry.add(`${publishedName}@${version}`);
+              try {
+                const publishOutput = execSync('npm publish --ignore-scripts 2>&1', { 
+                  encoding: 'utf8',
+                  env: { ...process.env, NODE_AUTH_TOKEN: process.env.GITHUB_TOKEN }
+                });
+                
+                // Log any warnings but don't fail
+                if (publishOutput.includes('npm warn')) {
+                  console.log('  ℹ️ Publish warnings (non-fatal):');
+                  const warnings = publishOutput.split('\n').filter(l => l.includes('npm warn'));
+                  warnings.forEach(w => console.log(`    ${w.trim()}`));
+                }
+                
+                console.log('  ✓ Published successfully');
+                stats.published++;
+                
+                // Add to registry for subsequent packages
+                publishedRegistry.add(`${publishedName}@${version}`);
+              } catch (publishError) {
+                // Check if it's just warnings (exit code 0 but stderr has warnings)
+                if (publishError.status === 0) {
+                  console.log('  ✓ Published successfully (with warnings)');
+                  stats.published++;
+                  publishedRegistry.add(`${publishedName}@${version}`);
+                } else {
+                  throw publishError;
+                }
+              }
               
             } catch (error) {
-              console.log(`  ✗ Failed: ${error.message}`);
+              const errorMsg = error.message || error.stderr || error.stdout || 'Unknown error';
+              console.log(`  ✗ Failed: ${errorMsg.split('\n')[0]}`);
               stats.failed++;
-              failedPackages.push(`${name}@${version}`);
+              failedPackages.push(`${name}@${version}: ${errorMsg.split('\n')[0]}`);
             } finally {
               // Cleanup and go back to root
-              process.chdir('../..');
               try {
-                execSync(`rm -rf temp-${i}`, { stdio: 'pipe' });
+                process.chdir(workDir);
+              } catch {}
+              
+              try {
+                execSync(`rm -rf ${tempDir}`, { stdio: 'pipe' });
               } catch {}
             }
           }
@@ -347,7 +406,13 @@ jobs:
           }
           
           // Write stats for GitHub Actions
-          fs.writeFileSync('stats.json', JSON.stringify(stats, null, 2));
+          fs.writeFileSync('stats.json', JSON.stringify({
+            total: stats.total,
+            alreadyPublished: stats.alreadyPublished,
+            published: stats.published,
+            failed: stats.failed,
+            failedPackages: failedPackages
+          }, null, 2));
           
           // Exit with error if any failed
           if (stats.failed > 0) {
@@ -356,6 +421,10 @@ jobs:
           EOF
           
           node process_all.js
+          
+          echo ""
+          echo "Checking final disk space:"
+          df -h .
           
           # Extract stats
           ALREADY_PUBLISHED=$(cat stats.json | jq -r '.alreadyPublished')
@@ -384,8 +453,13 @@ jobs:
           echo "- ✗ Failed: ${{ steps.publish_all.outputs.failed }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ "${{ steps.publish_all.outputs.failed }}" != "0" ]; then
-            echo "**Status:** Completed with failures" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.publish_all.outputs.failed }}" != "0" ] && [ -f "stats.json" ]; then
+            echo "### Failed Packages" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat stats.json | jq -r '.failedPackages[]' >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Status:** ⚠️ Completed with failures" >> $GITHUB_STEP_SUMMARY
           else
-            echo "**Status:**  All packages processed successfully" >> $GITHUB_STEP_SUMMARY
+            echo "**Status:** ✓ All packages processed successfully" >> $GITHUB_STEP_SUMMARY
           fi
