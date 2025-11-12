@@ -200,21 +200,23 @@ jobs:
           
           echo "Rescoping package from '$ORIG_NAME' to '$PUBLISHED_NAME'..."
           
-          # Read package.json
+          # Validate package.json existence
           if [ ! -f "package.json" ]; then
-            echo "Error: package.json not found"
+            echo "❌ Error: package.json not found"
             exit 1
           fi
-          
-          # Create rescope script
-          cat > rescope.cjs << 'EOF'
+
+          echo "✅ package.json found, creating CommonJS rescope script..."
+
+          # 🔧 Create rescope script as .cjs (force CommonJS)
+          cat <<'EOF' > rescope.cjs
           const fs = require('fs');
           const path = require('path');
-          
+
           const OWNER = process.env.OWNER.toLowerCase();
           const PUBLISHED_NAME = process.env.PUBLISHED_NAME;
           const REGISTRY_FILE = process.env.REGISTRY_FILE;
-          
+
           // Load published registry
           const publishedPackages = new Set();
           if (fs.existsSync(REGISTRY_FILE)) {
@@ -223,14 +225,13 @@ jobs:
               publishedPackages.add(line.trim());
             });
           }
-          
+
           console.log(`Loaded ${publishedPackages.size} published package versions`);
-          
-          // Helper functions
+
           function getSafeName(origName) {
             return origName.replace(/[@\/]/g, '-').replace(/^-+/, '');
           }
-          
+
           function getPublishedName(origName) {
             if (origName.startsWith('@')) {
               const [scope, pkg] = origName.split('/');
@@ -238,51 +239,40 @@ jobs:
             }
             return `@${OWNER}/${origName}`.toLowerCase();
           }
-          
+
           function rescopeDependencies(deps) {
             if (!deps || typeof deps !== 'object') return deps;
-            
+
             const rescoped = {};
             for (const [name, range] of Object.entries(deps)) {
               let newName = getPublishedName(name);
-              
-              // Try to find exact version match in registry
               if (/^\d+\.\d+\.\d+/.test(range)) {
                 const version = range.match(/^\d+\.\d+\.\d+(-[0-9A-Za-z\.-]+)?/)[0];
                 const exactKey = `${getPublishedName(name)}@${version}`;
-                
+
                 if (publishedPackages.has(exactKey)) {
                   newName = getPublishedName(name);
                 } else {
-                  // Try with safe name variant
                   const safeKey = `@${OWNER}/${getSafeName(name)}@${version}`;
                   if (publishedPackages.has(safeKey)) {
                     newName = `@${OWNER}/${getSafeName(name)}`;
                   }
                 }
               }
-              
               rescoped[newName] = range;
             }
-            
             return rescoped;
           }
-          
-          // Read and modify package.json
+
           const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          
           console.log(`Original name: ${pkg.name}`);
-          
-          // Change package name
+
           pkg.name = PUBLISHED_NAME;
-          
-          // Rescope all dependency types
           pkg.dependencies = rescopeDependencies(pkg.dependencies);
           pkg.devDependencies = rescopeDependencies(pkg.devDependencies);
           pkg.peerDependencies = rescopeDependencies(pkg.peerDependencies);
           pkg.optionalDependencies = rescopeDependencies(pkg.optionalDependencies);
-          
-          // Rescope bundledDependencies
+
           if (Array.isArray(pkg.bundledDependencies)) {
             pkg.bundledDependencies = pkg.bundledDependencies.map(name => {
               const published = getPublishedName(name);
@@ -290,8 +280,7 @@ jobs:
               return publishedKey ? published : getPublishedName(name);
             });
           }
-          
-          // Fix invalid main field
+
           if (pkg.main !== undefined && typeof pkg.main !== 'string') {
             if (Array.isArray(pkg.main) && pkg.main.length > 0) {
               pkg.main = pkg.main[0];
@@ -299,57 +288,49 @@ jobs:
               delete pkg.main;
             }
           }
-          
-          // Remove private flag
+
           delete pkg.private;
-          
-          // Set publishConfig
-          pkg.publishConfig = {
-            registry: 'https://npm.pkg.github.com'
-          };
-          
-          // Remove lifecycle scripts that could interfere
+          pkg.publishConfig = { registry: 'https://npm.pkg.github.com' };
+
           if (pkg.scripts) {
             const lifecycleScripts = [
               'preinstall', 'install', 'postinstall',
-              'prepack', 'postpack', 
+              'prepack', 'postpack',
               'prepare', 'prepublish', 'prepublishOnly', 'postpublish'
             ];
-            lifecycleScripts.forEach(script => {
-              if (pkg.scripts[script]) {
-                delete pkg.scripts[script];
-              }
-            });
+            lifecycleScripts.forEach(script => delete pkg.scripts[script]);
           }
-          
-          // Add repository if missing
+
           if (!pkg.repository) {
             pkg.repository = {
               type: 'git',
-              url: `git+https://github.com/${{ github.repository }}.git`
+              url: `git+https://github.com/${process.env.GITHUB_REPOSITORY}.git`
             };
           }
-          
-          // Write modified package.json
+
           fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-          
-          console.log(`Rescoped to: ${pkg.name}`);
+          console.log(`✅ Rescoped to: ${pkg.name}`);
           console.log(`Dependencies rescoped: ${Object.keys(pkg.dependencies || {}).length}`);
           console.log(`DevDependencies rescoped: ${Object.keys(pkg.devDependencies || {}).length}`);
           EOF
-          
-          # Run rescope script
-          node cjs
-          
-          # Remove .npmignore if exists
+
+          # 🔧 Verify script creation
+          echo "Verifying script file:"
+          ls -l rescope.cjs || (echo "❌ rescope.cjs not created" && exit 1)
+
+          # 🔧 Execute the CommonJS script safely
+          node rescope.cjs
+
+          # Clean up .npmignore if present
           rm -f .npmignore
-          
-          echo "Package rescoped successfully"
+
+          echo "✅ Package rescoped successfully"
         env:
           OWNER: ${{ github.repository_owner }}
           PUBLISHED_NAME: ${{ steps.names.outputs.published_name }}
           REGISTRY_FILE: ../../published_registry.txt
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 
       - name: Publish to GitHub Packages
         if: steps.check_published.outputs.already_published != 'true'
