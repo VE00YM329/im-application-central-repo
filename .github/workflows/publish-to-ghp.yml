@@ -207,7 +207,7 @@ jobs:
           fi
           
           # Create rescope script
-          cat > rescope.js << 'EOF'
+          cat > rescope.cjs << 'EOF'
           const fs = require('fs');
           const path = require('path');
           
@@ -339,7 +339,7 @@ jobs:
           EOF
           
           # Run rescope script
-          node rescope.js
+          node cjs
           
           # Remove .npmignore if exists
           rm -f .npmignore
