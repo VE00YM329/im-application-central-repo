@@ -91,7 +91,7 @@ jobs:
             else {
               continue;
             }
-            
+            console.log(`Package Version: ${key}`);
             const key = `${pkgName}@${pkgVersion}`;
             if (!seen.has(key)) {
               seen.add(key);
