@@ -92,7 +92,6 @@ jobs:
               continue;
             }
             const key = `${pkgName}@${pkgVersion}`;
-            console.log(`Package Version: ${key}`);
             if (!seen.has(key)) {
               seen.add(key);
               deps.push({ name: pkgName, version: pkgVersion });
@@ -101,6 +100,7 @@ jobs:
           
           console.log(`Found ${deps.length} unique dependencies`);
           fs.writeFileSync('deps.json', JSON.stringify(deps, null, 2));
+          console.log(`Dependencies retrieved: ${JSON.stringify(deps, null, 2)});
           EOF
           
           node parse_deps.js
