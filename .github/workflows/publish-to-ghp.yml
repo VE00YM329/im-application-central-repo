@@ -327,9 +327,16 @@ jobs:
               
               // Fix repository field - ensure it's an object
               if (pkg.repository && typeof pkg.repository === 'string') {
+                // Clean and normalize the URL
+                let url = pkg.repository;
+                // Remove any existing git+ prefix to avoid duplication
+                url = url.replace(/^git\+/, '');
+                // Ensure it starts with git+
+                url = `git+${url}`;
+                
                 pkg.repository = {
                   type: 'git',
-                  url: pkg.repository.startsWith('git+') ? pkg.repository : `git+${pkg.repository}`
+                  url: url
                 };
               } else if (!pkg.repository) {
                 pkg.repository = {
@@ -337,10 +344,12 @@ jobs:
                   url: `git+https://github.com/${{ github.repository }}.git`
                 };
               } else if (pkg.repository && typeof pkg.repository === 'object' && pkg.repository.url) {
-                // Ensure URL has git+ prefix
-                if (!pkg.repository.url.startsWith('git+')) {
-                  pkg.repository.url = `git+${pkg.repository.url}`;
-                }
+                // Clean and ensure URL has git+ prefix
+                let url = pkg.repository.url;
+                // Remove any existing git+ prefix to avoid duplication
+                url = url.replace(/^git\+/, '');
+                // Ensure it starts with git+
+                pkg.repository.url = `git+${url}`;
               }
               
               fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
@@ -355,7 +364,7 @@ jobs:
                 
                 // Log any warnings but don't fail
                 if (publishOutput.includes('npm warn')) {
-                  console.log('  ℹ️ Publish warnings (non-fatal):');
+                  console.log('Publish warnings (non-fatal):');
                   const warnings = publishOutput.split('\n').filter(l => l.includes('npm warn'));
                   warnings.forEach(w => console.log(`    ${w.trim()}`));
                 }
