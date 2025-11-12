@@ -387,7 +387,7 @@ jobs:
               
             } catch (error) {
               const errorMsg = error.message || error.stderr || error.stdout || 'Unknown error';
-              console.log(`  ✗ Failed: ${errorMsg.split('\n')[0]}`);
+              console.log(`  ✗ Failed: ${errorMsg}`);
               stats.failed++;
               failedPackages.push(`${name}@${version}: ${errorMsg.split('\n')[0]}`);
             } finally {
