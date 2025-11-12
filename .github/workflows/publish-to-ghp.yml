@@ -361,6 +361,8 @@ jobs:
                   encoding: 'utf8',
                   env: { ...process.env, NODE_AUTH_TOKEN: process.env.GITHUB_TOKEN }
                 });
+
+                console.log(`Publish Output: ${publishOutput}`)
                 
                 // Log any warnings but don't fail
                 if (publishOutput.includes('npm warn')) {
