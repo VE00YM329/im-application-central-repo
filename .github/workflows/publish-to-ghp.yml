@@ -248,7 +248,7 @@ jobs:
               execSync(`mkdir -p extracted && tar -xzf "${tarball}" -C extracted`, { stdio: 'pipe' });
               
               if (fs.existsSync('extracted/package')) {
-                execSync('mv extracted/package/* extracted/ && rmdir extracted/package', { stdio: 'pipe' });
+                execSync('mv extracted/package/* extracted/ && rm -rf extracted/package', { stdio: 'pipe' });
               }
               
               process.chdir('extracted');
