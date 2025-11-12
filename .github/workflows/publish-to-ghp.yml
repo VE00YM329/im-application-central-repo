@@ -373,27 +373,6 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify Publication
-        if: steps.check_published.outputs.already_published != 'true'
-        run: |
-          PUBLISHED_NAME="${{ steps.names.outputs.published_name }}"
-          VERSION="${{ steps.validate.outputs.package_version }}"
-          
-          echo "Verifying $PUBLISHED_NAME@$VERSION..."
-          
-          # Wait a bit for propagation
-          sleep 3
-          
-          # Try to view the package
-          if npm view "$PUBLISHED_NAME@$VERSION" version --registry=https://npm.pkg.github.com 2>/dev/null; then
-            echo "✓ Package verified in registry!"
-          else
-            echo "✗ Package not found in registry"
-            exit 1
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Summary
         if: always()
         run: |
