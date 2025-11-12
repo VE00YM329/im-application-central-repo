@@ -100,7 +100,6 @@ jobs:
           
           console.log(`Found ${deps.length} unique dependencies`);
           fs.writeFileSync('deps.json', JSON.stringify(deps, null, 2));
-          console.log(`Dependencies retrieved: ${JSON.stringify(deps, null, 2)}`);
           EOF
           
           node parse_deps.js
@@ -361,8 +360,6 @@ jobs:
                   encoding: 'utf8',
                   env: { ...process.env, NODE_AUTH_TOKEN: process.env.GITHUB_TOKEN }
                 });
-
-                console.log(`Publish Output: ${publishOutput}`)
                 
                 // Log any warnings but don't fail
                 if (publishOutput.includes('npm warn')) {
@@ -383,13 +380,13 @@ jobs:
                   stats.published++;
                   publishedRegistry.add(`${publishedName}@${version}`);
                 } else {
-                  throw publishError;
+                  console.log(`Error Occurred while publishing: ${publishError}`);
                 }
               }
               
             } catch (error) {
               const errorMsg = error.message || error.stderr || error.stdout || 'Unknown error';
-              console.log(`  ✗ Failed: ${errorMsg}`);
+              console.log(`Failed: ${errorMsg}`);
               stats.failed++;
               failedPackages.push(`${name}@${version}: ${errorMsg.split('\n')[0]}`);
             } finally {
