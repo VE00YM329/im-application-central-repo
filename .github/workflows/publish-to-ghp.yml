@@ -121,8 +121,12 @@ jobs:
           
           # Move package content to root of extracted
           if [ -d "extracted/package" ]; then
-            mv extracted/package/* extracted/
-            rmdir extracted/package
+            # Move all contents including hidden files
+            shopt -s dotglob
+            mv extracted/package/* extracted/ 2>/dev/null || true
+            shopt -u dotglob
+            # Remove the now-empty package directory
+            rm -rf extracted/package
           fi
           
           echo "Package extracted successfully"
