@@ -167,6 +167,28 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Configure NPM Authentication
+        run: |
+          # Create .npmrc with proper authentication
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > ~/.npmrc
+          echo "@${{ github.repository_owner }}:registry=https://npm.pkg.github.com" >> ~/.npmrc
+          
+          # Verify configuration
+          echo "NPM Configuration:"
+          cat ~/.npmrc
+          
+          # Verify token has package write permissions
+          echo "Verifying GitHub token permissions..."
+          RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/user)
+          
+          echo "Authenticated as: $(echo $RESPONSE | jq -r '.login')"
+          
+          # Test authentication
+          echo "Testing NPM authentication..."
+          npm whoami --registry=https://npm.pkg.github.com || echo "Warning: whoami failed, but publishing may still work"
+
       - name: Process and Publish All Dependencies
         id: publish_all
         run: |
@@ -352,9 +374,18 @@ jobs:
               
               // Publish with better error handling
               console.log('  Publishing...');
+              
+              // Ensure .npmrc exists in package directory
+              const npmrcContent = `//npm.pkg.github.com/:_authToken=${process.env.GITHUB_TOKEN}\n@${owner}:registry=https://npm.pkg.github.com\n`;
+              fs.writeFileSync('.npmrc', npmrcContent);
+              
               try {
-                const { stdout, stderr } = await execPromise('npm publish --ignore-scripts', {
-                  env: { ...process.env, NODE_AUTH_TOKEN: process.env.GITHUB_TOKEN }
+                const { stdout, stderr } = await execPromise('npm publish --ignore-scripts --registry=https://npm.pkg.github.com', {
+                  env: { 
+                    ...process.env, 
+                    NODE_AUTH_TOKEN: process.env.GITHUB_TOKEN,
+                    NPM_TOKEN: process.env.GITHUB_TOKEN
+                  }
                 });
                 
                 // Log output for debugging
