@@ -16,9 +16,55 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # Added for enhanced authentication
     
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check Repository Workflow Permissions
+        run: |
+          echo "Checking repository workflow permissions..."
+          
+          # Get repository settings
+          REPO_INFO=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}")
+          
+          echo "Repository: ${{ github.repository }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Repository Owner: ${{ github.repository_owner }}"
+          
+          # Check token scopes (this will be in headers)
+          echo ""
+          echo "Checking token permissions..."
+          curl -s -I -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/user" | grep -i "x-oauth-scopes" || echo "Could not determine token scopes"
+          
+          # Verify we can write to packages
+          echo ""
+          echo "Testing package write access..."
+          TEST_RESPONSE=$(curl -s -w "\n%{http_code}" -X GET \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/user/packages?package_type=npm")
+          
+          HTTP_CODE=$(echo "$TEST_RESPONSE" | tail -n1)
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✓ Package API access confirmed (HTTP $HTTP_CODE)"
+          else
+            echo "✗ Package API access issue (HTTP $HTTP_CODE)"
+            echo "Response: $(echo "$TEST_RESPONSE" | head -n-1)"
+          fi
+          
+          echo ""
+          echo "===================================================================="
+          echo "IMPORTANT: If you see 403 errors later, you need to:"
+          echo "1. Go to: https://github.com/${{ github.repository }}/settings/actions"
+          echo "2. Under 'Workflow permissions', select 'Read and write permissions'"
+          echo "3. Check 'Allow GitHub Actions to create and approve pull requests'"
+          echo "4. Click 'Save'"
+          echo "===================================================================="
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -169,25 +215,85 @@ jobs:
 
       - name: Configure NPM Authentication
         run: |
-          # Create .npmrc with proper authentication
-          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > ~/.npmrc
-          echo "@${{ github.repository_owner }}:registry=https://npm.pkg.github.com" >> ~/.npmrc
+          # Create .npmrc with proper authentication in home directory
+          cat > ~/.npmrc << EOF
+          //npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}
+          @${{ github.repository_owner }}:registry=https://npm.pkg.github.com
+          always-auth=true
+          EOF
+          
+          # Also create in current directory
+          cat > .npmrc << EOF
+          //npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}
+          @${{ github.repository_owner }}:registry=https://npm.pkg.github.com
+          always-auth=true
+          EOF
           
           # Verify configuration
-          echo "NPM Configuration:"
-          cat ~/.npmrc
+          echo "NPM Configuration (~/.npmrc):"
+          cat ~/.npmrc | sed 's/authToken=.*/authToken=***REDACTED***/'
           
           # Verify token has package write permissions
+          echo ""
           echo "Verifying GitHub token permissions..."
-          RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          TOKEN_INFO=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/user)
           
-          echo "Authenticated as: $(echo $RESPONSE | jq -r '.login')"
+          echo "Authenticated as: $(echo $TOKEN_INFO | jq -r '.login')"
           
-          # Test authentication
-          echo "Testing NPM authentication..."
-          npm whoami --registry=https://npm.pkg.github.com || echo "Warning: whoami failed, but publishing may still work"
+          # Check if we can access packages
+          echo ""
+          echo "Checking package access..."
+          PACKAGES=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/user/packages?package_type=npm" 2>/dev/null || echo "[]")
+          
+          PKG_COUNT=$(echo "$PACKAGES" | jq '. | length')
+          echo "Found $PKG_COUNT existing packages accessible to this token"
+          
+          # Test a simple publish (dry-run)
+          echo ""
+          echo "Testing publish capability (dry-run)..."
+          mkdir -p test-publish-check
+          cd test-publish-check
+          cat > package.json << TESTEOF
+          {
+            "name": "@${{ github.repository_owner }}/test-auth-check",
+            "version": "0.0.1-test",
+            "description": "Authentication test"
+          }
+          TESTEOF
+          
+          npm publish --dry-run --registry=https://npm.pkg.github.com 2>&1 || true
+          cd ..
+          rm -rf test-publish-check
+
+      - name: Configure Package Access for Repository
+        run: |
+          echo "Configuring package access permissions..."
+          
+          OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.repository }}"
+          
+          # Get all packages
+          PACKAGES=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/user/packages?package_type=npm&per_page=100")
+          
+          # For each package, ensure this repository has write access
+          echo "$PACKAGES" | jq -r '.[].name' | while read -r pkg_name; do
+            echo "Granting access to package: $pkg_name"
+            
+            # Try to add repository access (this may fail if already set, which is fine)
+            curl -s -X PUT \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/user/packages/npm/${pkg_name}/repositories/${{ github.repository_id }}" \
+              -d '{}' 2>/dev/null || echo "  (may already have access)"
+          done
+          
+          echo "Package access configuration complete"
 
       - name: Process and Publish All Dependencies
         id: publish_all
@@ -349,25 +455,24 @@ jobs:
                 lifecycleScripts.forEach(script => delete pkg.scripts[script]);
               }
               
-              // Fix repository field - ensure it's an object
+              // Fix repository field - ensure it's an object with correct repo
+              const correctRepoUrl = `git+https://github.com/${{ github.repository }}.git`;
+              
               if (pkg.repository && typeof pkg.repository === 'string') {
-                let url = pkg.repository;
-                url = url.replace(/^git\+/, '');
-                url = `git+${url}`;
-                
                 pkg.repository = {
                   type: 'git',
-                  url: url
+                  url: correctRepoUrl
                 };
-              } else if (!pkg.repository) {
+              } else if (!pkg.repository || !pkg.repository.url) {
+                // CRITICAL: Always set repository to link package to this repo
                 pkg.repository = {
                   type: 'git',
-                  url: `git+https://github.com/${{ github.repository }}.git`
+                  url: correctRepoUrl
                 };
-              } else if (pkg.repository && typeof pkg.repository === 'object' && pkg.repository.url) {
-                let url = pkg.repository.url;
-                url = url.replace(/^git\+/, '');
-                pkg.repository.url = `git+${url}`;
+              } else if (pkg.repository && typeof pkg.repository === 'object') {
+                // Override with our repository to ensure proper linking
+                pkg.repository.type = 'git';
+                pkg.repository.url = correctRepoUrl;
               }
               
               fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
@@ -375,18 +480,32 @@ jobs:
               // Publish with better error handling
               console.log('  Publishing...');
               
-              // Ensure .npmrc exists in package directory
-              const npmrcContent = `//npm.pkg.github.com/:_authToken=${process.env.GITHUB_TOKEN}\n@${owner}:registry=https://npm.pkg.github.com\n`;
+              // Create .npmrc with explicit auth in the package directory
+              const npmrcContent = [
+                `//npm.pkg.github.com/:_authToken=\${GITHUB_TOKEN}`,
+                `@${owner}:registry=https://npm.pkg.github.com`,
+                `always-auth=true`
+              ].join('\n');
               fs.writeFileSync('.npmrc', npmrcContent);
               
+              // Also set npm config programmatically
               try {
-                const { stdout, stderr } = await execPromise('npm publish --ignore-scripts --registry=https://npm.pkg.github.com', {
-                  env: { 
-                    ...process.env, 
-                    NODE_AUTH_TOKEN: process.env.GITHUB_TOKEN,
-                    NPM_TOKEN: process.env.GITHUB_TOKEN
+                await execPromise(`npm config set //npm.pkg.github.com/:_authToken ${process.env.GITHUB_TOKEN}`);
+              } catch {}
+              
+              try {
+                // Use npm publish with explicit authentication
+                const { stdout, stderr } = await execPromise(
+                  'npm publish --ignore-scripts --registry=https://npm.pkg.github.com --loglevel verbose',
+                  {
+                    env: { 
+                      ...process.env, 
+                      NODE_AUTH_TOKEN: process.env.GITHUB_TOKEN,
+                      NPM_TOKEN: process.env.GITHUB_TOKEN,
+                      NPM_CONFIG_REGISTRY: 'https://npm.pkg.github.com'
+                    }
                   }
-                });
+                );
                 
                 // Log output for debugging
                 if (stdout) console.log('  STDOUT:', stdout.trim());
