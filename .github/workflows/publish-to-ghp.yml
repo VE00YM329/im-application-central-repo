@@ -272,9 +272,26 @@ jobs:
               }
               
               process.chdir('extracted');
+
+              // Detect package.json in expected locations
+              let pkgPath = 'package.json';
+              if (!fs.existsSync(pkgPath)) {
+                if (fs.existsSync('package/package.json')) {
+                  pkgPath = 'package/package.json';
+                } else {
+                  const found = fs.readdirSync('.').find(f => f.endsWith('package.json'));
+                  if (found) pkgPath = found;
+                }
+              }
+              
+              // If still missing, skip gracefully
+              if (!fs.existsSync(pkgPath)) {
+                throw new Error(`No package.json found after extraction for ${name}@${version}`);
+              }
+              
+              const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
               
               // Rescope package
-              const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
               const publishedName = getPublishedName(name);
               
               console.log(`  Original package: ${pkg.name}@${pkg.version}`);
