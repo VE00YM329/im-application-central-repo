@@ -135,10 +135,6 @@ jobs:
         run: |
           OWNER="${{ github.repository_owner }}"
           
-          # Check available disk space
-          echo "Available disk space:"
-          df -h .
-          
           cat > process_all.js << 'EOF'
           const fs = require('fs');
           const { exec } = require('child_process');
@@ -395,11 +391,11 @@ jobs:
                   // Actual failure
                   console.log('  ✗ Publishing failed');
                   const errorMsg = publishError.stderr || publishError.stdout || publishError.message || 'Unknown error';
-                  console.log('  Error:', errorMsg.split('\n')[0]);
+                  console.log('  Error:', errorMsg);
                   stats.failed++;
                   failedPackages.push({
                     package: `${name}@${version}`,
-                    error: errorMsg.split('\n').slice(0, 3).join('\n')
+                    error: errorMsg
                   });
                 }
               }
