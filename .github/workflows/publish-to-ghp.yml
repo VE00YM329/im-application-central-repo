@@ -273,23 +273,41 @@ jobs:
               
               process.chdir('extracted');
 
-              // Detect package.json in expected locations
+              // Try to locate package.json in common patterns
               let pkgPath = 'package.json';
+              
               if (!fs.existsSync(pkgPath)) {
+                // Typical npm pack structure
                 if (fs.existsSync('package/package.json')) {
                   pkgPath = 'package/package.json';
                 } else {
-                  const found = fs.readdirSync('.').find(f => f.endsWith('package.json'));
-                  if (found) pkgPath = found;
+                  // Look for any one-level-deep folder containing package.json
+                  const subdirs = fs.readdirSync('.', { withFileTypes: true })
+                    .filter(d => d.isDirectory())
+                    .map(d => d.name);
+                  
+                  for (const dir of subdirs) {
+                    const candidate = `${dir}/package.json`;
+                    if (fs.existsSync(candidate)) {
+                      pkgPath = candidate;
+                      break;
+                    }
+                  }
                 }
               }
               
-              // If still missing, skip gracefully
+              // If still not found, show contents for debugging
               if (!fs.existsSync(pkgPath)) {
+                console.log('No package.json found. Directory contents:');
                 throw new Error(`No package.json found after extraction for ${name}@${version}`);
               }
               
+              // Read and parse package.json
               const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+              
+              // Change working directory to where package.json was found (so publish runs correctly)
+              process.chdir(require('path').dirname(pkgPath));
+
               
               // Rescope package
               const publishedName = getPublishedName(name);
