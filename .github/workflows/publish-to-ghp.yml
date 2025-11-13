@@ -22,55 +22,10 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write  # Added for enhanced authentication
+      id-token: write
     
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check Repository Workflow Permissions
-        run: |
-          echo "Checking repository workflow permissions..."
-          
-          # Get repository settings
-          REPO_INFO=$(curl -s -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}")
-          
-          echo "Repository: ${{ github.repository }}"
-          echo "Actor: ${{ github.actor }}"
-          echo "Repository Owner: ${{ github.repository_owner }}"
-          
-          # Check token scopes (this will be in headers)
-          echo ""
-          echo "Checking token permissions..."
-          curl -s -I -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/user" | grep -i "x-oauth-scopes" || echo "Could not determine token scopes"
-          
-          # Verify we can write to packages
-          echo ""
-          echo "Testing package write access..."
-          TEST_RESPONSE=$(curl -s -w "\n%{http_code}" -X GET \
-            -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/user/packages?package_type=npm")
-          
-          HTTP_CODE=$(echo "$TEST_RESPONSE" | tail -n1)
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "✓ Package API access confirmed (HTTP $HTTP_CODE)"
-          else
-            echo "✗ Package API access issue (HTTP $HTTP_CODE)"
-            echo "Response: $(echo "$TEST_RESPONSE" | head -n-1)"
-          fi
-          
-          echo ""
-          echo "===================================================================="
-          echo "IMPORTANT: If you see 403 errors later, you need to:"
-          echo "1. Go to: https://github.com/${{ github.repository }}/settings/actions"
-          echo "2. Under 'Workflow permissions', select 'Read and write permissions'"
-          echo "3. Check 'Allow GitHub Actions to create and approve pull requests'"
-          echo "4. Click 'Save'"
-          echo "===================================================================="
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -154,11 +109,9 @@ jobs:
           
           echo "Total dependencies to process: $DEP_COUNT"
 
-      - name: Build Published Package Registry
-        id: build_registry
+      - name: Setup API Type
+        id: setup_api
         run: |
-          echo "Building registry of published packages..."
-          
           OWNER="${{ github.repository_owner }}"
           GITHUB_REPO="${{ github.repository }}"
           
@@ -174,158 +127,8 @@ jobs:
             API_TYPE="users"
           fi
           
-          # Create registry file
-          touch published_registry.txt
-          
-          # Fetch all published packages
-          PAGE=1
-          while [ $PAGE -lt 10 ]; do
-            RESPONSE=$(curl -sf -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/${API_TYPE}/${OWNER}/packages?package_type=npm&per_page=100&page=${PAGE}" 2>/dev/null || echo "[]")
-            
-            # Check if response is empty array
-            if [ "$RESPONSE" = "[]" ]; then
-              break
-            fi
-            
-            # Extract package names and get versions
-            echo "$RESPONSE" | jq -r '.[].name' | while read -r pkg_name; do
-              # Get versions for this package
-              VERSIONS=$(curl -sf -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/${API_TYPE}/${OWNER}/packages/npm/${pkg_name}/versions" 2>/dev/null || echo "[]")
-              
-              echo "$VERSIONS" | jq -r '.[].name' | while read -r version; do
-                echo "@${OWNER}/${pkg_name}@${version}" >> published_registry.txt
-              done
-            done
-            
-            PAGE=$((PAGE + 1))
-          done
-          
-          # Count entries
-          REGISTRY_SIZE=$(wc -l < published_registry.txt)
-          echo "Registry built: $REGISTRY_SIZE package versions"
-          echo "registry_size=$REGISTRY_SIZE" >> $GITHUB_OUTPUT
-        env:
-          NODE_AUTH_TOKEN: ${{ env.AUTH_TOKEN }}
-
-      - name: Configure NPM Authentication
-        run: |
-          # Determine which token to use
-          if [ -n "${{ secrets.PAT_TOKEN }}" ]; then
-            echo "Using PAT_TOKEN for authentication"
-            AUTH_TOKEN="${{ secrets.PAT_TOKEN }}"
-          else
-            echo "Using GITHUB_TOKEN for authentication"
-            AUTH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
-          fi
-          
-          # Create .npmrc with proper authentication in home directory
-          cat > ~/.npmrc << EOF
-          //npm.pkg.github.com/:_authToken=${AUTH_TOKEN}
-          @${{ github.repository_owner }}:registry=https://npm.pkg.github.com
-          always-auth=true
-          EOF
-          
-          # Also create in current directory
-          cat > .npmrc << EOF
-          //npm.pkg.github.com/:_authToken=${AUTH_TOKEN}
-          @${{ github.repository_owner }}:registry=https://npm.pkg.github.com
-          always-auth=true
-          EOF
-          
-          # Verify configuration
-          echo "NPM Configuration (~/.npmrc):"
-          cat ~/.npmrc | sed 's/authToken=.*/authToken=***REDACTED***/'
-          
-          # Verify token has package write permissions
-          echo ""
-          echo "Verifying GitHub token permissions..."
-          TOKEN_INFO=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/user)
-          
-          echo "Authenticated as: $(echo $TOKEN_INFO | jq -r '.login')"
-          
-          # Check if we can access packages
-          echo ""
-          echo "Checking package access..."
-          PACKAGES=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/user/packages?package_type=npm" 2>/dev/null || echo "[]")
-          
-          PKG_COUNT=$(echo "$PACKAGES" | jq '. | length')
-          echo "Found $PKG_COUNT existing packages accessible to this token"
-          
-          # Test a simple publish (dry-run)
-          echo ""
-          echo "Testing publish capability (dry-run)..."
-          mkdir -p test-publish-check
-          cd test-publish-check
-          cat > package.json << TESTEOF
-          {
-            "name": "@${{ github.repository_owner }}/test-auth-check",
-            "version": "0.0.1-test",
-            "description": "Authentication test"
-          }
-          TESTEOF
-          
-          npm publish --dry-run --registry=https://npm.pkg.github.com 2>&1 || true
-          cd ..
-          rm -rf test-publish-check
-          
-          echo ""
-          echo "===================================================================="
-          if [ -z "${{ secrets.PAT_TOKEN }}" ]; then
-            echo "WARNING: Using GITHUB_TOKEN which has limited permissions"
-            echo ""
-            echo "For better results, create a Personal Access Token (PAT):"
-            echo "1. Go to: https://github.com/settings/tokens?type=beta"
-            echo "2. Click 'Generate new token' (Fine-grained)"
-            echo "3. Give it a name like 'Package Publishing'"
-            echo "4. Select repository: ${{ github.repository }}"
-            echo "5. Under 'Permissions' -> 'Repository permissions':"
-            echo "   - Contents: Read"
-            echo "   - Packages: Read and Write"
-            echo "6. Click 'Generate token'"
-            echo "7. Add to repository secrets as 'PAT_TOKEN':"
-            echo "   https://github.com/${{ github.repository }}/settings/secrets/actions"
-            echo ""
-            echo "Also ensure repository workflow permissions are set:"
-            echo "https://github.com/${{ github.repository }}/settings/actions"
-            echo "→ Select 'Read and write permissions'"
-          else
-            echo "✓ Using PAT_TOKEN for authentication"
-          fi
-          echo "===================================================================="
-
-      - name: Configure Package Access for Repository
-        run: |
-          echo "Configuring package access permissions..."
-          
-          OWNER="${{ github.repository_owner }}"
-          REPO_NAME="${{ github.repository }}"
-          
-          # Get all packages
-          PACKAGES=$(curl -s -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/user/packages?package_type=npm&per_page=100")
-          
-          # For each package, ensure this repository has write access
-          echo "$PACKAGES" | jq -r '.[].name' | while read -r pkg_name; do
-            echo "Granting access to package: $pkg_name"
-            
-            # Try to add repository access (this may fail if already set, which is fine)
-            curl -s -X PUT \
-              -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/user/packages/npm/${pkg_name}/repositories/${{ github.repository_id }}" \
-              -d '{}' 2>/dev/null || echo "  (may already have access)"
-          done
-          
-          echo "Package access configuration complete"
+          echo "api_type=$API_TYPE" >> $GITHUB_OUTPUT
+          echo "Using API type: $API_TYPE for owner: $OWNER"
 
       - name: Process and Publish All Dependencies
         id: publish_all
@@ -340,18 +143,15 @@ jobs:
           const fs = require('fs');
           const { exec } = require('child_process');
           const { promisify } = require('util');
+          const https = require('https');
           
           const execPromise = promisify(exec);
           
           const deps = JSON.parse(fs.readFileSync('deps.json', 'utf8'));
-          const publishedRegistry = new Set(
-            fs.readFileSync('published_registry.txt', 'utf8')
-              .split('\n')
-              .filter(Boolean)
-              .map(line => line.trim())
-          );
           
           const owner = process.env.OWNER.toLowerCase();
+          const apiType = process.env.API_TYPE;
+          const authToken = process.env.AUTH_TOKEN;
           
           function getSafeName(origName) {
             return origName.replace(/[@\/]/g, '-').replace(/^-+/, '');
@@ -365,10 +165,50 @@ jobs:
             return `@${owner}/${origName}`.toLowerCase();
           }
           
-          function isAlreadyPublished(name, version) {
-            const publishedName = getPublishedName(name);
-            const key = `${publishedName}@${version}`;
-            return publishedRegistry.has(key);
+          // Check if package@version exists via GitHub API
+          async function checkPackageExists(name, version) {
+            return new Promise((resolve) => {
+              const publishedName = getPublishedName(name);
+              // Extract package name without scope for API call
+              const packageName = publishedName.substring(owner.length + 2); // Remove @owner/
+              
+              const options = {
+                hostname: 'api.github.com',
+                path: `/${apiType}/${owner}/packages/npm/${encodeURIComponent(packageName)}/versions`,
+                method: 'GET',
+                headers: {
+                  'Authorization': `Bearer ${authToken}`,
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'GitHub-Actions'
+                }
+              };
+              
+              const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', (chunk) => data += chunk);
+                res.on('end', () => {
+                  try {
+                    if (res.statusCode === 200) {
+                      const versions = JSON.parse(data);
+                      const exists = versions.some(v => v.name === version);
+                      resolve(exists);
+                    } else {
+                      // Package doesn't exist or we can't access it
+                      resolve(false);
+                    }
+                  } catch (e) {
+                    resolve(false);
+                  }
+                });
+              });
+              
+              req.on('error', () => resolve(false));
+              req.setTimeout(5000, () => {
+                req.destroy();
+                resolve(false);
+              });
+              req.end();
+            });
           }
           
           const stats = {
@@ -390,8 +230,11 @@ jobs:
             
             console.log(`\n[${index + 1}/${deps.length}] ${name}@${version}`);
             
-            // Check if already published
-            if (isAlreadyPublished(name, version)) {
+            // Check if already published using GitHub API
+            console.log('  Checking if already published...');
+            const exists = await checkPackageExists(name, version);
+            
+            if (exists) {
               console.log('  ✓ Already published');
               stats.alreadyPublished++;
               return;
@@ -452,8 +295,6 @@ jobs:
               pkg.version = version;
               
               console.log(`  New package identity: ${pkg.name}@${pkg.version}`);
-              
-              pkg.name = publishedName;
               
               // Rescope dependencies
               function rescopeDeps(deps) {
@@ -525,23 +366,9 @@ jobs:
               // Publish with better error handling
               console.log('  Publishing...');
               
-              // Create .npmrc with explicit auth in the package directory
-              const npmrcContent = [
-                `//npm.pkg.github.com/:_authToken=\${AUTH_TOKEN}`,
-                `@${owner}:registry=https://npm.pkg.github.com`,
-                `always-auth=true`
-              ].join('\n');
-              fs.writeFileSync('.npmrc', npmrcContent);
-              
-              // Also set npm config programmatically
               try {
-                await execPromise(`npm config set //npm.pkg.github.com/:_authToken ${process.env.AUTH_TOKEN}`);
-              } catch {}
-              
-              try {
-                // Use npm publish with explicit authentication
                 const { stdout, stderr } = await execPromise(
-                  'npm publish --ignore-scripts --registry=https://npm.pkg.github.com --loglevel verbose',
+                  'npm publish --ignore-scripts --registry=https://npm.pkg.github.com',
                   {
                     env: { 
                       ...process.env, 
@@ -552,63 +379,38 @@ jobs:
                   }
                 );
                 
-                // Log output for debugging
-                if (stdout) console.log('  STDOUT:', stdout.trim());
-                if (stderr) {
-                  // NPM often sends warnings to stderr even on success
-                  const stderrLines = stderr.trim().split('\n');
-                  const hasErrors = stderrLines.some(line => 
-                    line.toLowerCase().includes('error') && 
-                    !line.toLowerCase().includes('npm warn')
-                  );
-                  
-                  if (hasErrors) {
-                    console.log('  STDERR (ERRORS):', stderr.trim());
-                  } else if (stderr.includes('npm warn')) {
-                    console.log('  Publish warnings (non-fatal):');
-                    stderrLines.filter(l => l.includes('npm warn')).forEach(w => 
-                      console.log(`    ${w.trim()}`)
-                    );
-                  }
-                }
-                
                 console.log('  ✓ Published successfully');
                 stats.published++;
                 
-                // Add to registry for subsequent packages
-                publishedRegistry.add(`${publishedName}@${version}`);
-                
               } catch (publishError) {
-                // Detailed error logging
-                console.log('  ✗ Publishing failed');
-                console.log('  Error code:', publishError.code);
+                // Check for specific error types
+                const errorOutput = (publishError.stderr || publishError.stdout || '').toLowerCase();
                 
-                if (publishError.stdout) {
-                  console.log('  STDOUT:', publishError.stdout.trim());
-                }
-                
-                if (publishError.stderr) {
-                  console.log('  STDERR:', publishError.stderr.trim());
-                }
-                
-                // Check if it's already published (common error)
-                if (publishError.stderr && publishError.stderr.includes('cannot publish over')) {
-                  console.log('  → Package already exists in registry');
+                if (errorOutput.includes('cannot publish over') || 
+                    errorOutput.includes('already exists') ||
+                    errorOutput.includes('you cannot publish over the previously published versions')) {
+                  console.log('  ✓ Already published (detected during publish)');
                   stats.alreadyPublished++;
-                  publishedRegistry.add(`${publishedName}@${version}`);
                 } else {
-                  throw publishError;
+                  // Actual failure
+                  console.log('  ✗ Publishing failed');
+                  const errorMsg = publishError.stderr || publishError.stdout || publishError.message || 'Unknown error';
+                  console.log('  Error:', errorMsg.split('\n')[0]);
+                  stats.failed++;
+                  failedPackages.push({
+                    package: `${name}@${version}`,
+                    error: errorMsg.split('\n').slice(0, 3).join('\n')
+                  });
                 }
               }
               
             } catch (error) {
               const errorMsg = error.stderr || error.stdout || error.message || 'Unknown error';
               console.log(`  ✗ Failed: ${errorMsg.split('\n')[0]}`);
-              console.log('  Full error:', errorMsg);
               stats.failed++;
               failedPackages.push({
                 package: `${name}@${version}`,
-                error: errorMsg.split('\n').slice(0, 5).join('\n')  // First 5 lines of error
+                error: errorMsg.split('\n').slice(0, 3).join('\n')
               });
             } finally {
               // Cleanup and go back to root
@@ -675,6 +477,7 @@ jobs:
           echo "failed=$FAILED" >> $GITHUB_OUTPUT
         env:
           OWNER: ${{ github.repository_owner }}
+          API_TYPE: ${{ steps.setup_api.outputs.api_type }}
           AUTH_TOKEN: ${{ env.AUTH_TOKEN }}
           NODE_AUTH_TOKEN: ${{ env.AUTH_TOKEN }}
 
