@@ -314,14 +314,17 @@ jobs:
               // Rescope dependencies
               function rescopeDeps(deps) {
                 if (!deps || typeof deps !== 'object') return deps;
+              
                 const rescoped = {};
+              
                 for (const [depName, range] of Object.entries(deps)) {
-                  const newName = getPublishedName(depName);
-                  rescoped[newName] = range;
+                  const scopedName = getPublishedName(depName); // ex: @ve00ym329/amqplib
+                  rescoped[depName] = `${scopedName}@${range}`; // alias format
                 }
+              
                 return rescoped;
               }
-              
+
               pkg.dependencies = rescopeDeps(pkg.dependencies);
               pkg.devDependencies = rescopeDeps(pkg.devDependencies);
               pkg.peerDependencies = rescopeDeps(pkg.peerDependencies);
