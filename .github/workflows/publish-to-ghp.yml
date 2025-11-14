@@ -33,23 +33,7 @@ jobs:
           node-version: '16.13.2'
           registry-url: 'https://npm.pkg.github.com'
           scope: '@${{ github.repository_owner }}'
-
-      - name: Validate Inputs
-        id: validate
-        run: |
-          PKG_NAME="${{ github.event.inputs.package_name }}"
-          PKG_VERSION="${{ github.event.inputs.package_version }}"
           
-          echo "Package: $PKG_NAME@$PKG_VERSION"
-          
-          # Validate version format
-          if ! echo "$PKG_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z\.-]+)?$'; then
-            echo "Error: Invalid version format: $PKG_VERSION"
-            exit 1
-          fi
-          
-          echo "package_name=$PKG_NAME" >> $GITHUB_OUTPUT
-          echo "package_version=$PKG_VERSION" >> $GITHUB_OUTPUT
 
       - name: Generate Complete Dependency Tree
         id: generate_tree
