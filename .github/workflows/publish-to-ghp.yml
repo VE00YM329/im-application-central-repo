@@ -38,8 +38,8 @@ jobs:
       - name: Generate Complete Dependency Tree
         id: generate_tree
         run: |
-          PKG_NAME="${{ steps.validate.outputs.package_name }}"
-          VERSION="${{ steps.validate.outputs.package_version }}"
+          PKG_NAME="${{ github.event.inputs.package_name }}"
+          VERSION="${{ github.event.inputs.package_version }}"
           
           echo "Generating complete dependency tree for $PKG_NAME@$VERSION..."
           
@@ -504,7 +504,7 @@ jobs:
         run: |
           echo "## Workflow Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Root Package:** ${{ steps.validate.outputs.package_name }}@${{ steps.validate.outputs.package_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Root Package:** ${{ github.event.inputs.package_name }}@${{ github.event.inputs.package_version }}" >> $GITHUB_STEP_SUMMARY
           echo "**Total Dependencies:** ${{ steps.generate_tree.outputs.dependency_count }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Results" >> $GITHUB_STEP_SUMMARY
