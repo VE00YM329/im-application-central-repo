@@ -114,390 +114,144 @@ jobs:
           echo "api_type=$API_TYPE" >> $GITHUB_OUTPUT
           echo "Using API type: $API_TYPE for owner: $OWNER"
 
-      - name: Process and Publish All Dependencies
-        id: publish_all
+      - name: Process & Publish Dependencies (Corrected)
         run: |
-          OWNER="${{ github.repository_owner }}"
-          
           cat > process_all.js << 'EOF'
+          /**
+           * PROCESS & PUBLISH PACKAGES CORRECTLY
+           * -----------------------------------
+           * FIXES INCLUDED:
+           *  1. DO NOT flatten extracted directories (npm pack structure must remain)
+           *  2. After rescoping package.json, run "npm install --production"
+           *  3. Rescope dependencies to actual names, NOT alias format
+           *  4. Re-pack using "npm pack" after installation
+           *  5. Publish the newly created tarball
+           */
+
           const fs = require('fs');
-          const { exec } = require('child_process');
-          const { promisify } = require('util');
-          const https = require('https');
-          
-          const execPromise = promisify(exec);
-          
+          const path = require('path');
+          const { execSync } = require('child_process');
+
+          const OWNER = process.env.OWNER.toLowerCase();
+          const AUTH_TOKEN = process.env.AUTH_TOKEN;
+
+          // FIX: Correct rescope function (NO alias format)
+          function getPublishedName(orig) {
+            if (orig.startsWith('@')) {
+              const [scope, pkg] = orig.split('/');
+              return `@${OWNER}/${scope.replace('@','')}-${pkg}`;
+            }
+            return `@${OWNER}/${orig}`;
+          }
+
+          // Load dep list
           const deps = JSON.parse(fs.readFileSync('deps.json', 'utf8'));
-          
-          const owner = process.env.OWNER.toLowerCase();
-          const apiType = process.env.API_TYPE;
-          const authToken = process.env.AUTH_TOKEN;
-          
-          function getSafeName(origName) {
-            return origName.replace(/[@\/]/g, '-').replace(/^-+/, '');
+          console.log(`Processing ${deps.length} packages…`);
+
+          function exec(cmd, opts = {}) {
+            return execSync(cmd, { stdio: 'pipe', ...opts }).toString().trim();
           }
-          
-          function getPublishedName(origName) {
-            if (origName.startsWith('@')) {
-              const [scope, pkg] = origName.split('/');
-              return `@${owner}/${scope.substring(1)}-${pkg}`.toLowerCase();
+
+          for (let i = 0; i < deps.length; i++) {
+            const { name, version } = deps[i];
+            console.log(`\n[${i+1}/${deps.length}] ${name}@${version}`);
+
+            // === DOWNLOAD ===
+            const tarball = exec(`npm pack "${name}@${version}" --registry=https://registry.npmjs.org/`)
+                            .split('\n').pop();
+            if (!fs.existsSync(tarball)) {
+              console.log("  ERROR: Tarball missing");
+              continue;
             }
-            return `@${owner}/${origName}`.toLowerCase();
-          }
-          
-          // Check if package@version exists via GitHub API
-          async function checkPackageExists(name, version) {
-            return new Promise((resolve) => {
-              const publishedName = getPublishedName(name);
-              // Extract package name without scope for API call
-              const packageName = publishedName.substring(owner.length + 2); // Remove @owner/
-              
-              const options = {
-                hostname: 'api.github.com',
-                path: `/${apiType}/${owner}/packages/npm/${encodeURIComponent(packageName)}/versions`,
-                method: 'GET',
-                headers: {
-                  'Authorization': `Bearer ${authToken}`,
-                  'Accept': 'application/vnd.github+json',
-                  'User-Agent': 'GitHub-Actions'
-                }
-              };
-              
-              const req = https.request(options, (res) => {
-                let data = '';
-                res.on('data', (chunk) => data += chunk);
-                res.on('end', () => {
-                  try {
-                    if (res.statusCode === 200) {
-                      const versions = JSON.parse(data);
-                      const exists = versions.some(v => v.name === version);
-                      resolve(exists);
-                    } else {
-                      // Package doesn't exist or we can't access it
-                      resolve(false);
-                    }
-                  } catch (e) {
-                    resolve(false);
-                  }
-                });
-              });
-              
-              req.on('error', () => resolve(false));
-              req.setTimeout(5000, () => {
-                req.destroy();
-                resolve(false);
-              });
-              req.end();
-            });
-          }
-          
-          const stats = {
-            total: deps.length,
-            alreadyPublished: 0,
-            published: 0,
-            failed: 0
-          };
-          
-          const failedPackages = [];
-          
-          console.log(`\nProcessing ${deps.length} packages...`);
-          
-          // Create a base working directory
-          const workDir = process.cwd();
-          
-          async function processPackage(dep, index) {
-            const { name, version } = dep;
-            
-            console.log(`\n[${index + 1}/${deps.length}] ${name}@${version}`);
-            
-            // Check if already published using GitHub API
-            console.log('  Checking if already published...');
-            const exists = await checkPackageExists(name, version);
-            
-            if (exists) {
-              console.log('  ✓ Already published');
-              stats.alreadyPublished++;
-              return;
+
+            // === EXTRACT – FIX: Keep npm pack structure exactly ===
+            const workDir = `work-${i}`;
+            exec(`mkdir -p ${workDir}`);
+            exec(`tar -xzf "${tarball}" -C "${workDir}"`);
+
+            // npm pack extracts into "package" folder
+            const pkgDir = path.join(workDir, "package");
+            if (!fs.existsSync(path.join(pkgDir, "package.json"))) {
+              console.log("  ERROR: Invalid package structure");
+              continue;
             }
-            
-            const tempDir = `temp-${index}`;
-            
+
+            // === LOAD package.json ===
+            const pkgPath = path.join(pkgDir, "package.json");
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+
+            // === RESCOPE NAME ===
+            const newName = getPublishedName(name);
+            pkg.name = newName;
+
+            // === FIX 1: DO NOT alias dependencies inside libs ===
+            // MUST use proper scoped dependency names
+            function rescopeDeps(obj) {
+              if (!obj) return obj;
+              const out = {};
+              for (const [dep, range] of Object.entries(obj)) {
+                out[getPublishedName(dep)] = range;
+              }
+              return out;
+            }
+
+            pkg.dependencies = rescopeDeps(pkg.dependencies);
+            pkg.devDependencies = rescopeDeps(pkg.devDependencies);
+            pkg.peerDependencies = rescopeDeps(pkg.peerDependencies);
+            pkg.optionalDependencies = rescopeDeps(pkg.optionalDependencies);
+
+            // Persist updated package.json
+            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+
+            // === FIX 2: INSTALL dependencies INSIDE the extracted package ===
+            console.log("  Installing inside repackaged module…");
+            exec(`npm install --production --ignore-scripts`, { cwd: pkgDir });
+
+            // === FIX 3: REPACK the FINAL VALID PACKAGE ===
+            console.log("  Repacking using npm pack…");
+            const packed = exec(`npm pack`, { cwd: pkgDir }).split('\n').pop();
+            const finalTar = path.join(pkgDir, packed);
+
+            if (!fs.existsSync(finalTar)) {
+              console.log("  ERROR: repacking failed");
+              continue;
+            }
+
+            // === FIX 4: PUBLISH CLEAN TARBALL ===
+            console.log(`  Publishing ${newName}@${version}`);
             try {
-              // Ensure we're in the base directory
-              process.chdir(workDir);
-              
-              // Clean up any existing temp directory
-              try {
-                await execPromise(`rm -rf ${tempDir}`);
-              } catch {}
-              
-              // Download package
-              console.log('  Downloading...');
-              await execPromise(`mkdir -p ${tempDir}`);
-              process.chdir(tempDir);
-              
-              const { stdout: packOutput } = await execPromise(
-                `npm pack "${name}@${version}" --registry=https://registry.npmjs.org/`
+              exec(
+                `npm publish "${finalTar}" --registry=https://npm.pkg.github.com --ignore-scripts`,
+                {
+                  cwd: pkgDir,
+                  env: {
+                    ...process.env,
+                    NODE_AUTH_TOKEN: AUTH_TOKEN
+                  }
+                }
               );
-              
-              const tarball = packOutput.trim().split('\n').pop();
-              
-              if (!fs.existsSync(tarball)) {
-                throw new Error('Failed to download package');
+              console.log("  ✓ Published successfully");
+            } catch (err) {
+              if (String(err).includes("cannot publish over") ||
+                  String(err).includes("already exists")) {
+                console.log("  ✓ Already published");
+              } else {
+                console.log("  ✗ Failed to publish");
+                console.log(err.toString().split("\n")[0]);
               }
-              
-              // Extract
-              await execPromise(`mkdir -p extracted && tar -xzf "${tarball}" -C extracted`);
-              
-              // Move contents from package subdirectory if it exists
-              if (fs.existsSync('extracted/package')) {
-                await execPromise('mv extracted/package/* extracted/package/.* extracted/ 2>/dev/null || true');
-                await execPromise('rm -rf extracted/package');
-              }
-              
-              process.chdir('extracted');
-
-              // Try to locate package.json in common patterns
-              let pkgPath = 'package.json';
-              
-              if (!fs.existsSync(pkgPath)) {
-                // Typical npm pack structure
-                if (fs.existsSync('package/package.json')) {
-                  pkgPath = 'package/package.json';
-                } else {
-                  // Look for any one-level-deep folder containing package.json
-                  const subdirs = fs.readdirSync('.', { withFileTypes: true })
-                    .filter(d => d.isDirectory())
-                    .map(d => d.name);
-                  
-                  for (const dir of subdirs) {
-                    const candidate = `${dir}/package.json`;
-                    if (fs.existsSync(candidate)) {
-                      pkgPath = candidate;
-                      break;
-                    }
-                  }
-                }
-              }
-              
-              // If still not found, show contents for debugging
-              if (!fs.existsSync(pkgPath)) {
-                console.log('No package.json found. Directory contents:');
-                throw new Error(`No package.json found after extraction for ${name}@${version}`);
-              }
-              
-              // Read and parse package.json
-              const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-              
-              // Change working directory to where package.json was found (so publish runs correctly)
-              process.chdir(require('path').dirname(pkgPath));
-
-              
-              // Rescope package
-              const publishedName = getPublishedName(name);
-              
-              console.log(`  Original package: ${pkg.name}@${pkg.version}`);
-              console.log(`  Rescoping to ${publishedName}...`);
-              
-              // CRITICAL: Preserve the original version
-              const originalVersion = pkg.version;
-              if (!originalVersion || originalVersion === 'undefined') {
-                throw new Error(`Invalid version in package.json: ${originalVersion}. Expected version: ${version}`);
-              }
-              
-              pkg.name = publishedName;
-              // Ensure version is set correctly
-              pkg.version = version;
-              
-              console.log(`  New package identity: ${pkg.name}@${pkg.version}`);
-              
-              // Rescope dependencies
-              function rescopeDeps(deps) {
-                if (!deps || typeof deps !== 'object') return deps;
-              
-                const rescoped = {};
-              
-                for (const [depName, range] of Object.entries(deps)) {
-                  const scopedName = getPublishedName(depName); // ex: @ve00ym329/amqplib
-                  rescoped[depName] = `${scopedName}@${range}`; // alias format
-                }
-              
-                return rescoped;
-              }
-
-              pkg.dependencies = rescopeDeps(pkg.dependencies);
-              pkg.devDependencies = rescopeDeps(pkg.devDependencies);
-              pkg.peerDependencies = rescopeDeps(pkg.peerDependencies);
-              pkg.optionalDependencies = rescopeDeps(pkg.optionalDependencies);
-              
-              if (Array.isArray(pkg.bundledDependencies)) {
-                pkg.bundledDependencies = pkg.bundledDependencies.map(d => getPublishedName(d));
-              }
-              
-              // Fix invalid main field
-              if (pkg.main !== undefined && typeof pkg.main !== 'string') {
-                if (Array.isArray(pkg.main) && pkg.main.length > 0) {
-                  pkg.main = pkg.main[0];
-                } else {
-                  delete pkg.main;
-                }
-              }
-              
-              delete pkg.private;
-              
-              pkg.publishConfig = {
-                registry: 'https://npm.pkg.github.com'
-              };
-              
-              // Remove lifecycle scripts
-              if (pkg.scripts) {
-                const lifecycleScripts = [
-                  'preinstall', 'install', 'postinstall',
-                  'prepack', 'postpack',
-                  'prepare', 'prepublish', 'prepublishOnly', 'postpublish'
-                ];
-                lifecycleScripts.forEach(script => delete pkg.scripts[script]);
-              }
-              
-              // Fix repository field - ensure it's an object with correct repo
-              const correctRepoUrl = `git+https://github.com/${{ github.repository }}.git`;
-              
-              if (pkg.repository && typeof pkg.repository === 'string') {
-                pkg.repository = {
-                  type: 'git',
-                  url: correctRepoUrl
-                };
-              } else if (!pkg.repository || !pkg.repository.url) {
-                // CRITICAL: Always set repository to link package to this repo
-                pkg.repository = {
-                  type: 'git',
-                  url: correctRepoUrl
-                };
-              } else if (pkg.repository && typeof pkg.repository === 'object') {
-                // Override with our repository to ensure proper linking
-                pkg.repository.type = 'git';
-                pkg.repository.url = correctRepoUrl;
-              }
-              
-              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-              
-              // Publish with better error handling
-              console.log('  Publishing...');
-              
-              try {
-                const { stdout, stderr } = await execPromise(
-                  'npm publish --ignore-scripts --registry=https://npm.pkg.github.com',
-                  {
-                    env: { 
-                      ...process.env, 
-                      NODE_AUTH_TOKEN: process.env.AUTH_TOKEN,
-                      NPM_TOKEN: process.env.AUTH_TOKEN,
-                      NPM_CONFIG_REGISTRY: 'https://npm.pkg.github.com'
-                    }
-                  }
-                );
-                
-                console.log('  ✓ Published successfully');
-                stats.published++;
-                
-              } catch (publishError) {
-                // Check for specific error types
-                const errorOutput = (publishError.stderr || publishError.stdout || '').toLowerCase();
-                
-                if (errorOutput.includes('cannot publish over') || 
-                    errorOutput.includes('already exists') ||
-                    errorOutput.includes('you cannot publish over the previously published versions')) {
-                  console.log('  ✓ Already published (detected during publish)');
-                  stats.alreadyPublished++;
-                } else {
-                  // Actual failure
-                  console.log('  ✗ Publishing failed');
-                  const errorMsg = publishError.stderr || publishError.stdout || publishError.message || 'Unknown error';
-                  console.log('  Error:', errorMsg);
-                  stats.failed++;
-                  failedPackages.push({
-                    package: `${name}@${version}`,
-                    error: errorMsg
-                  });
-                }
-              }
-              
-            } catch (error) {
-              const errorMsg = error.stderr || error.stdout || error.message || 'Unknown error';
-              console.log(`  ✗ Failed: ${errorMsg.split('\n')[0]}`);
-              stats.failed++;
-              failedPackages.push({
-                package: `${name}@${version}`,
-                error: errorMsg.split('\n').slice(0, 3).join('\n')
-              });
-            } finally {
-              // Cleanup and go back to root
-              try {
-                process.chdir(workDir);
-              } catch {}
-              
-              try {
-                await execPromise(`rm -rf ${tempDir}`);
-              } catch {}
             }
+
+            // Cleanup
+            exec(`rm -rf ${workDir}`);
+            fs.unlinkSync(tarball);
           }
-          
-          // Process packages sequentially
-          (async () => {
-            for (let i = 0; i < deps.length; i++) {
-              await processPackage(deps[i], i);
-            }
-            
-            // Summary
-            console.log('\n=== SUMMARY ===');
-            console.log(`Total: ${stats.total}`);
-            console.log(`Already published: ${stats.alreadyPublished}`);
-            console.log(`Newly published: ${stats.published}`);
-            console.log(`Failed: ${stats.failed}`);
-            
-            if (failedPackages.length > 0) {
-              console.log('\n=== FAILED PACKAGES ===');
-              failedPackages.forEach(({ package: pkg, error }) => {
-                console.log(`\n${pkg}:`);
-                console.log(error);
-              });
-            }
-            
-            // Write stats for GitHub Actions
-            fs.writeFileSync('stats.json', JSON.stringify({
-              total: stats.total,
-              alreadyPublished: stats.alreadyPublished,
-              published: stats.published,
-              failed: stats.failed,
-              failedPackages: failedPackages
-            }, null, 2));
-            
-            // Exit with error if any failed
-            if (stats.failed > 0) {
-              process.exit(1);
-            }
-          })();
+
           EOF
-          
+
           node process_all.js
-          
-          echo ""
-          echo "Checking final disk space:"
-          df -h .
-          
-          # Extract stats
-          ALREADY_PUBLISHED=$(cat stats.json | jq -r '.alreadyPublished')
-          PUBLISHED=$(cat stats.json | jq -r '.published')
-          FAILED=$(cat stats.json | jq -r '.failed')
-          
-          echo "already_published=$ALREADY_PUBLISHED" >> $GITHUB_OUTPUT
-          echo "published=$PUBLISHED" >> $GITHUB_OUTPUT
-          echo "failed=$FAILED" >> $GITHUB_OUTPUT
         env:
           OWNER: ${{ github.repository_owner }}
-          API_TYPE: ${{ steps.setup_api.outputs.api_type }}
           AUTH_TOKEN: ${{ env.AUTH_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ env.AUTH_TOKEN }}
 
       - name: Summary
         if: always()
