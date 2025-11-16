@@ -11,8 +11,11 @@ on:
         required: true
 
 env:
+  # NEW: Make both registries explicit and separate
+  NPMJS_REGISTRY: https://registry.npmjs.org/
+  GPR_REGISTRY: https://npm.pkg.github.com
+
   # Use PAT_TOKEN if available, otherwise fall back to GITHUB_TOKEN
-  # To create PAT: Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens
   # Required permissions: read:packages, write:packages
   AUTH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -23,7 +26,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    
+
     steps:
       - uses: actions/checkout@v4
 
@@ -31,43 +34,43 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '16.13.2'
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@${{ github.repository_owner }}'
-          
+          # CHANGED: do NOT globally set registry-url to GitHub.
+          # We will call npm with --registry explicitly where needed,
+          # so that all default operations talk to npmjs.org, not GPR.
+          # registry-url: 'https://npm.pkg.github.com'
+          # scope: '@${{ github.repository_owner }}'
 
       - name: Generate Complete Dependency Tree
         id: generate_tree
         run: |
           PKG_NAME="${{ github.event.inputs.package_name }}"
           VERSION="${{ github.event.inputs.package_version }}"
-          
+
           echo "Generating complete dependency tree for $PKG_NAME@$VERSION..."
-          
+
           # Install npm-remote-ls globally
           npm install -g npm-remote-ls
-          
-          # Generate flat dependency list
-          echo "Running npm-remote-ls..."
-          npm-remote-ls "$PKG_NAME@$VERSION" --development=false -f > deps_raw.txt || true
-          
-          # Parse and create dependency list
+
+          echo "Running npm-remote-ls (against npmjs.org)..."
+          # CHANGED: force npmjs registry here, NOT GitHub
+          npm-remote-ls "$PKG_NAME@$VERSION" \
+            --development=false -f \
+            --registry=${NPMJS_REGISTRY} > deps_raw.txt || true
+
           cat > parse_deps.js << 'EOF'
           const fs = require('fs');
 
           const raw = fs.readFileSync('deps_raw.txt', 'utf8');
           const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-          
+
           const deps = [];
           const seen = new Set();
-          
+
           for (let line of lines) {
-            // Remove tree characters, brackets, and quotes
             line = line.replace(/[│├└─\[\],'"`]/g, '').trim();
-          
-            // Extract all patterns like package@version
             const matches = line.match(/(@?[^@\s]+\/?[^@\s]*)@([0-9]+\.[0-9]+\.[0-9]+[^\s]*)/g);
             if (!matches) continue;
-          
+
             for (const match of matches) {
               const m = match.match(/^(@?[^@\s]+\/?[^@\s]*)@(.+)$/);
               if (!m) continue;
@@ -80,17 +83,15 @@ jobs:
               }
             }
           }
-          
+
           console.log(`Found ${deps.length} unique dependencies`);
           fs.writeFileSync('deps.json', JSON.stringify(deps, null, 2));
           EOF
-          
+
           node parse_deps.js
-          
-          # Count dependencies
+
           DEP_COUNT=$(cat deps.json | jq '. | length')
           echo "dependency_count=$DEP_COUNT" >> $GITHUB_OUTPUT
-          
           echo "Total dependencies to process: $DEP_COUNT"
 
       - name: Setup API Type
@@ -98,8 +99,7 @@ jobs:
         run: |
           OWNER="${{ github.repository_owner }}"
           GITHUB_REPO="${{ github.repository }}"
-          
-          # Determine if org or user
+
           if [[ "$GITHUB_REPO" == *"/"* ]]; then
             REPO_OWNER=$(echo "$GITHUB_REPO" | cut -d'/' -f1)
             if [[ "$REPO_OWNER" != "$OWNER" ]]; then
@@ -110,148 +110,303 @@ jobs:
           else
             API_TYPE="users"
           fi
-          
+
           echo "api_type=$API_TYPE" >> $GITHUB_OUTPUT
           echo "Using API type: $API_TYPE for owner: $OWNER"
 
-      - name: Process & Publish Dependencies (Corrected)
+      - name: Process and Publish All Dependencies
+        id: publish_all
         run: |
+          OWNER="${{ github.repository_owner }}"
+
           cat > process_all.js << 'EOF'
-          /**
-           * PROCESS & PUBLISH PACKAGES CORRECTLY
-           * -----------------------------------
-           * FIXES INCLUDED:
-           *  1. DO NOT flatten extracted directories (npm pack structure must remain)
-           *  2. After rescoping package.json, run "npm install --production"
-           *  3. Rescope dependencies to actual names, NOT alias format
-           *  4. Re-pack using "npm pack" after installation
-           *  5. Publish the newly created tarball
-           */
-
           const fs = require('fs');
+          const { exec } = require('child_process');
+          const { promisify } = require('util');
+          const https = require('https');
           const path = require('path');
-          const { execSync } = require('child_process');
 
-          const OWNER = process.env.OWNER.toLowerCase();
-          const AUTH_TOKEN = process.env.AUTH_TOKEN;
+          const execPromise = promisify(exec);
 
-          // FIX: Correct rescope function (NO alias format)
-          function getPublishedName(orig) {
-            if (orig.startsWith('@')) {
-              const [scope, pkg] = orig.split('/');
-              return `@${OWNER}/${scope.replace('@','')}-${pkg}`;
-            }
-            return `@${OWNER}/${orig}`;
-          }
-
-          // Load dep list
           const deps = JSON.parse(fs.readFileSync('deps.json', 'utf8'));
-          console.log(`Processing ${deps.length} packages…`);
 
-          function exec(cmd, opts = {}) {
-            return execSync(cmd, { stdio: 'pipe', ...opts }).toString().trim();
+          const owner = process.env.OWNER.toLowerCase();
+          const apiType = process.env.API_TYPE;
+          const authToken = process.env.AUTH_TOKEN;
+          const npmjsRegistry = process.env.NPMJS_REGISTRY;
+          const gprRegistry = process.env.GPR_REGISTRY;
+
+          function getPublishedName(origName) {
+            if (origName.startsWith('@')) {
+              const [scope, pkg] = origName.split('/');
+              return `@${owner}/${scope.substring(1)}-${pkg}`.toLowerCase();
+            }
+            return `@${owner}/${origName}`.toLowerCase();
           }
 
-          for (let i = 0; i < deps.length; i++) {
-            const { name, version } = deps[i];
-            console.log(`\n[${i+1}/${deps.length}] ${name}@${version}`);
+          // Check if package@version exists via GitHub API
+          async function checkPackageExists(name, version) {
+            return new Promise((resolve) => {
+              const publishedName = getPublishedName(name);
+              const packageName = publishedName.substring(owner.length + 2); // strip "@owner/"
 
-            // === DOWNLOAD ===
-            const tarball = exec(`npm pack "${name}@${version}" --registry=https://registry.npmjs.org/`)
-                            .split('\n').pop();
-            if (!fs.existsSync(tarball)) {
-              console.log("  ERROR: Tarball missing");
-              continue;
+              const options = {
+                hostname: 'api.github.com',
+                path: `/${apiType}/${owner}/packages/npm/${encodeURIComponent(packageName)}/versions`,
+                method: 'GET',
+                headers: {
+                  'Authorization': `Bearer ${authToken}`,
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'GitHub-Actions'
+                }
+              };
+
+              const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', (chunk) => data += chunk);
+                res.on('end', () => {
+                  try {
+                    if (res.statusCode === 200) {
+                      const versions = JSON.parse(data);
+                      const exists = versions.some(v => v.name === version);
+                      return resolve(exists);
+                    }
+                    return resolve(false);
+                  } catch {
+                    return resolve(false);
+                  }
+                });
+              });
+
+              req.on('error', () => resolve(false));
+              req.setTimeout(5000, () => {
+                req.destroy();
+                resolve(false);
+              });
+              req.end();
+            });
+          }
+
+          const stats = {
+            total: deps.length,
+            alreadyPublished: 0,
+            published: 0,
+            failed: 0
+          };
+
+          const failedPackages = [];
+          const workDir = process.cwd();
+
+          // CHANGED: helper to rescope deps using npm alias syntax
+          function rescopeDeps(deps) {
+            if (!deps || typeof deps !== 'object') return deps;
+            const rescoped = {};
+            for (const [depName, range] of Object.entries(deps)) {
+              const scopedName = getPublishedName(depName);
+              // Keep original key (so require("depName") continues working)
+              // but point it to our scoped package using alias syntax.
+              rescoped[depName] = `${scopedName}@${range}`;
+            }
+            return rescoped;
+          }
+
+          async function processPackage(dep, index) {
+            const { name, version } = dep;
+
+            console.log(`\n[${index + 1}/${deps.length}] ${name}@${version}`);
+            console.log('  Checking if already published via API...');
+
+            const exists = await checkPackageExists(name, version);
+            if (exists) {
+              console.log('  ✓ Already published');
+              stats.alreadyPublished++;
+              return;
             }
 
-            // === EXTRACT – FIX: Keep npm pack structure exactly ===
-            const workDir = `work-${i}`;
-            exec(`mkdir -p ${workDir}`);
-            exec(`tar -xzf "${tarball}" -C "${workDir}"`);
+            const tempDir = `temp-${index}`;
 
-            // npm pack extracts into "package" folder
-            const pkgDir = path.join(workDir, "package");
-            if (!fs.existsSync(path.join(pkgDir, "package.json"))) {
-              console.log("  ERROR: Invalid package structure");
-              continue;
-            }
-
-            // === LOAD package.json ===
-            const pkgPath = path.join(pkgDir, "package.json");
-            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-
-            // === RESCOPE NAME ===
-            const newName = getPublishedName(name);
-            pkg.name = newName;
-
-            // === FIX 1: DO NOT alias dependencies inside libs ===
-            // MUST use proper scoped dependency names
-            function rescopeDeps(obj) {
-              if (!obj) return obj;
-              const out = {};
-              for (const [dep, range] of Object.entries(obj)) {
-                out[getPublishedName(dep)] = range;
-              }
-              return out;
-            }
-
-            pkg.dependencies = rescopeDeps(pkg.dependencies);
-            pkg.devDependencies = rescopeDeps(pkg.devDependencies);
-            pkg.peerDependencies = rescopeDeps(pkg.peerDependencies);
-            pkg.optionalDependencies = rescopeDeps(pkg.optionalDependencies);
-
-            // Persist updated package.json
-            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
-
-            // === FIX 2: INSTALL dependencies INSIDE the extracted package ===
-            console.log("  Installing inside repackaged module…");
-            exec(`npm install --production --ignore-scripts`, { cwd: pkgDir });
-
-            // === FIX 3: REPACK the FINAL VALID PACKAGE ===
-            console.log("  Repacking using npm pack…");
-            const packed = exec(`npm pack`, { cwd: pkgDir }).split('\n').pop();
-            const finalTar = path.join(pkgDir, packed);
-
-            if (!fs.existsSync(finalTar)) {
-              console.log("  ERROR: repacking failed");
-              continue;
-            }
-
-            // === FIX 4: PUBLISH CLEAN TARBALL ===
-            console.log(`  Publishing ${newName}@${version}`);
             try {
-              exec(
-                `npm publish "${finalTar}" --registry=https://npm.pkg.github.com --ignore-scripts`,
+              process.chdir(workDir);
+
+              try { await execPromise(`rm -rf ${tempDir}`); } catch {}
+
+              console.log('  Downloading from npmjs.org...');
+              await execPromise(`mkdir -p ${tempDir}`);
+              process.chdir(tempDir);
+
+              // CHANGED: always use npmjs registry here
+              const { stdout: packOutput } = await execPromise(
+                `npm pack "${name}@${version}" --registry=${npmjsRegistry}`
+              );
+
+              const tarball = packOutput.trim().split('\n').pop();
+              if (!fs.existsSync(tarball)) {
+                throw new Error('Failed to download package tarball');
+              }
+
+              await execPromise(`mkdir -p extracted && tar -xzf "${tarball}" -C extracted`);
+
+              // Handle typical npm pack structure
+              let pkgRoot = path.join('extracted', 'package');
+              if (!fs.existsSync(path.join(pkgRoot, 'package.json'))) {
+                // fallback: direct extracted/
+                pkgRoot = 'extracted';
+              }
+
+              const pkgPath = path.join(pkgRoot, 'package.json');
+              if (!fs.existsSync(pkgPath)) {
+                throw new Error(`No package.json found for ${name}@${version}`);
+              }
+
+              const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+
+              const publishedName = getPublishedName(name);
+              console.log(`  Original: ${pkg.name}@${pkg.version}`);
+              console.log(`  Rescoping to: ${publishedName}@${version}`);
+
+              pkg.name = publishedName;
+              pkg.version = version;
+
+              // CHANGED: keep alias pattern to preserve unscoped require()s
+              pkg.dependencies = rescopeDeps(pkg.dependencies);
+              pkg.devDependencies = rescopeDeps(pkg.devDependencies);
+              pkg.peerDependencies = rescopeDeps(pkg.peerDependencies);
+              pkg.optionalDependencies = rescopeDeps(pkg.optionalDependencies);
+
+              if (Array.isArray(pkg.bundledDependencies)) {
+                pkg.bundledDependencies = pkg.bundledDependencies.map(d => getPublishedName(d));
+              }
+
+              // Fix non-string main
+              if (pkg.main !== undefined && typeof pkg.main !== 'string') {
+                if (Array.isArray(pkg.main) && pkg.main.length > 0) {
+                  pkg.main = pkg.main[0];
+                } else {
+                  delete pkg.main;
+                }
+              }
+
+              delete pkg.private;
+
+              pkg.publishConfig = {
+                registry: gprRegistry
+              };
+
+              // Remove lifecycle scripts (avoid remote install side effects)
+              if (pkg.scripts) {
+                const lifecycleScripts = [
+                  'preinstall', 'install', 'postinstall',
+                  'prepack', 'postpack',
+                  'prepare', 'prepublish', 'prepublishOnly', 'postpublish'
+                ];
+                lifecycleScripts.forEach(s => delete pkg.scripts[s]);
+              }
+
+              // CHANGED: repository always points to this repo
+              const correctRepoUrl = `git+https://github.com/${process.env.GITHUB_REPOSITORY}.git`;
+              pkg.repository = {
+                type: 'git',
+                url: correctRepoUrl
+              };
+
+              fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+
+              // CRITICAL CHANGE:
+              // We do NOT run "npm install" inside the repackaged module.
+              // We only publish the metadata + source, dependencies are resolved
+              // when the consumer installs from GitHub.
+              console.log('  Publishing to GitHub Packages...');
+
+              await execPromise(
+                `npm publish --ignore-scripts --registry=${gprRegistry}`,
                 {
-                  cwd: pkgDir,
+                  cwd: pkgRoot, // ensure we publish from the folder containing package.json
                   env: {
                     ...process.env,
-                    NODE_AUTH_TOKEN: AUTH_TOKEN
+                    NODE_AUTH_TOKEN: authToken,
+                    NPM_CONFIG_REGISTRY: gprRegistry
                   }
                 }
               );
-              console.log("  ✓ Published successfully");
+
+              console.log('  ✓ Published successfully');
+              stats.published++;
+
             } catch (err) {
-              if (String(err).includes("cannot publish over") ||
-                  String(err).includes("already exists")) {
-                console.log("  ✓ Already published");
+              const msg = (err.stderr || err.stdout || err.message || 'Unknown error');
+              const lower = msg.toLowerCase();
+
+              if (
+                lower.includes('cannot publish over') ||
+                lower.includes('already exists') ||
+                lower.includes('you cannot publish over the previously published versions')
+              ) {
+                console.log('  ✓ Already published (publish conflict)');
+                stats.alreadyPublished++;
               } else {
-                console.log("  ✗ Failed to publish");
-                console.log(err.toString().split("\n")[0]);
+                console.log('  ✗ Failed:', msg.split('\n')[0]);
+                stats.failed++;
+                failedPackages.push({ package: `${name}@${version}`, error: msg });
+              }
+            } finally {
+              try { process.chdir(workDir); } catch {}
+              try { await execPromise(`rm -rf ${tempDir}`); } catch {}
+            }
+          }
+
+          (async () => {
+            console.log(`Processing ${deps.length} packages...`);
+            for (let i = 0; i < deps.length; i++) {
+              await processPackage(deps[i], i);
+            }
+
+            console.log('\n=== SUMMARY ===');
+            console.log(`Total: ${stats.total}`);
+            console.log(`Already published: ${stats.alreadyPublished}`);
+            console.log(`Newly published: ${stats.published}`);
+            console.log(`Failed: ${stats.failed}`);
+
+            if (failedPackages.length) {
+              console.log('\n=== FAILED PACKAGES ===');
+              for (const f of failedPackages) {
+                console.log(`\n${f.package}`);
+                console.log(f.error);
               }
             }
 
-            // Cleanup
-            exec(`rm -rf ${workDir}`);
-            fs.unlinkSync(tarball);
-          }
+            fs.writeFileSync('stats.json', JSON.stringify({
+              total: stats.total,
+              alreadyPublished: stats.alreadyPublished,
+              published: stats.published,
+              failed: stats.failed,
+              failedPackages
+            }, null, 2));
 
+            if (stats.failed > 0) process.exit(1);
+          })();
           EOF
 
           node process_all.js
+
+          echo ""
+          echo "Checking final disk space:"
+          df -h .
+
+          ALREADY_PUBLISHED=$(cat stats.json | jq -r '.alreadyPublished')
+          PUBLISHED=$(cat stats.json | jq -r '.published')
+          FAILED=$(cat stats.json | jq -r '.failed')
+
+          echo "already_published=$ALREADY_PUBLISHED" >> $GITHUB_OUTPUT
+          echo "published=$PUBLISHED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
         env:
           OWNER: ${{ github.repository_owner }}
+          API_TYPE: ${{ steps.setup_api.outputs.api_type }}
           AUTH_TOKEN: ${{ env.AUTH_TOKEN }}
+          NPMJS_REGISTRY: ${{ env.NPMJS_REGISTRY }}   # NEW
+          GPR_REGISTRY: ${{ env.GPR_REGISTRY }}       # NEW
+          NODE_AUTH_TOKEN: ${{ env.AUTH_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
 
       - name: Summary
         if: always()
@@ -266,7 +421,7 @@ jobs:
           echo "- ✓ Newly published: ${{ steps.publish_all.outputs.published }}" >> $GITHUB_STEP_SUMMARY
           echo "- ✗ Failed: ${{ steps.publish_all.outputs.failed }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
+
           if [ "${{ steps.publish_all.outputs.failed }}" != "0" ] && [ -f "stats.json" ]; then
             echo "### Failed Packages" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
