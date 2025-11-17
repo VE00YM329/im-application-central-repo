@@ -314,7 +314,7 @@ jobs:
               
                 for (const [depName, range] of Object.entries(deps)) {
                   const scopedName = getPublishedName(depName); // ex: @ve00ym329/amqplib
-                  rescoped[depName] = `${scopedName}@${range}`; // alias format
+                  rescoped[scopedName] = `${range}`; // alias format
                 }
               
                 return rescoped;
