@@ -316,33 +316,34 @@ jobs:
               // We only publish the metadata + source, dependencies are resolved
               // when the consumer installs from GitHub.
               console.log('  Publishing to GitHub Packages...');
-
+              // WRITE .npmrc INSIDE THE PACKAGE FOLDER (CRITICAL FIX)
+              const npmrc = `
+              always-auth=true
+              @${owner}:registry=${gprRegistry}
+              //npm.pkg.github.com/:_authToken=${authToken}
+              //registry.npm.pkg.github.com/:_authToken=${authToken}
+              `;
+              fs.writeFileSync(path.join(pkgRoot, '.npmrc'), npmrc.trim());
+              console.log("  ✓ .npmrc written for authentication");
+              
+              // Publish
+              console.log("  Publishing…");
               await execPromise(
-                `npm publish --ignore-scripts --registry=${gprRegistry} --always-auth`,
+                `npm publish --ignore-scripts --registry=${gprRegistry}`,
                 {
                   cwd: pkgRoot,
                   env: {
                     ...process.env,
-              
-                    // Required for GitHub Packages authentication
                     NODE_AUTH_TOKEN: authToken,
                     NPM_TOKEN: authToken,
-              
-                    // Registry settings
                     NPM_CONFIG_REGISTRY: gprRegistry,
                     npm_config_registry: gprRegistry,
-              
-                    // Auth settings for GitHub Packages specifically
-                    [`npm_config_//npm.pkg.github.com/:_authToken`]: authToken,
-                    [`npm_config_//registry.npm.pkg.github.com/:_authToken`]: authToken,
-              
-                    npm_config_always_auth: "true"
+                    npm_config_always_auth: "true",
                   }
                 }
               );
+              console.log("  ✓ Published successfully");
 
-
-              console.log('  ✓ Published successfully');
               stats.published++;
 
             } catch (err) {
