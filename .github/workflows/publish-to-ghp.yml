@@ -422,7 +422,7 @@ jobs:
               stats.failed++;
               failedPackages.push({
                 package: `${name}@${version}`,
-                error: errorMsg.split('\n').slice(0, 3).join('\n')
+                error: errorMsg
               });
             } finally {
               // Cleanup and go back to root
