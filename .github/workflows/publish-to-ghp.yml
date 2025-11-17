@@ -357,7 +357,7 @@ jobs:
                 console.log('  ✓ Already published (publish conflict)');
                 stats.alreadyPublished++;
               } else {
-                console.log('  ✗ Failed:', msg.split('\n')[0]);
+                console.log('  ✗ Failed:', msg);
                 stats.failed++;
                 failedPackages.push({ package: `${name}@${version}`, error: msg });
               }
