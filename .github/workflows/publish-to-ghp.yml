@@ -38,8 +38,8 @@ jobs:
       - name: Generate Complete Dependency Tree
         id: generate_tree
         run: |
-          PKG_NAME="${{ steps.validate.outputs.package_name }}"
-          VERSION="${{ steps.validate.outputs.package_version }}"
+          PKG_NAME="${{ github.event.inputs.package_name }}"
+          VERSION="${{ github.event.inputs.package_version }}"
           
           echo "Generating complete dependency tree for $PKG_NAME@$VERSION..."
           
@@ -314,7 +314,7 @@ jobs:
               
                 for (const [depName, range] of Object.entries(deps)) {
                   const scopedName = getPublishedName(depName); // ex: @ve00ym329/amqplib
-                  rescoped[scopedName] = `${range}`; // alias format
+                  rescoped[depName] = `${scopedName}@${range}`; // alias format
                 }
               
                 return rescoped;
@@ -498,31 +498,6 @@ jobs:
         run: |
           echo "## Workflow Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Root Package:** ${{ steps.validate.outputs.package_name }}@${{ steps.validate.outputs.package_version }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Total Dependencies:** ${{ steps.generate_tree.outputs.dependency_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Results" >> $GITHUB_STEP_SUMMARY
-          echo "- ✓ Already published: ${{ steps.publish_all.outputs.already_published }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ✓ Newly published: ${{ steps.publish_all.outputs.published }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ✗ Failed: ${{ steps.publish_all.outputs.failed }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ steps.publish_all.outputs.failed }}" != "0" ] && [ -f "stats.json" ]; then
-            echo "### Failed Packages" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            cat stats.json | jq -r '.failedPackages[] | "\(.package)\n\(.error)\n"' >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Status:** ⚠️ Completed with failures" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "**Status:** ✓ All packages processed successfully" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "## Workflow Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Root Package:** ${{ github.event.inputs.package_name }}@${{ github.event.inputs.package_version }}" >> $GITHUB_STEP_SUMMARY
           echo "**Total Dependencies:** ${{ steps.generate_tree.outputs.dependency_count }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -531,7 +506,7 @@ jobs:
           echo "- ✓ Newly published: ${{ steps.publish_all.outputs.published }}" >> $GITHUB_STEP_SUMMARY
           echo "- ✗ Failed: ${{ steps.publish_all.outputs.failed }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-
+          
           if [ "${{ steps.publish_all.outputs.failed }}" != "0" ] && [ -f "stats.json" ]; then
             echo "### Failed Packages" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
