@@ -294,6 +294,7 @@ jobs:
               pkg.devDependencies = rescopeDeps(pkg.devDependencies);
               pkg.peerDependencies = rescopeDeps(pkg.peerDependencies);
               pkg.optionalDependencies = rescopeDeps(pkg.optionalDependencies);
+              pkg.peerDependenciesMeta = rescopeDeps(pkg.peerDependenciesMeta);
               
               if (Array.isArray(pkg.bundledDependencies)) {
                 pkg.bundledDependencies = pkg.bundledDependencies.map(d => getPublishedName(d));
