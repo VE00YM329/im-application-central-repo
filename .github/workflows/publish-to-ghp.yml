@@ -243,41 +243,47 @@ jobs:
               if (!fs.existsSync(tarball)) {
                 throw new Error('Failed to download package tarball');
               }
-
+              
+              // Extract
               await execPromise(`mkdir -p extracted && tar -xzf "${tarball}" -C extracted`);
+              
+              // Move contents from package subdirectory if it exists
+              if (fs.existsSync('extracted/package')) {
+                await execPromise('mv extracted/package/* extracted/package/.* extracted/ 2>/dev/null || true');
+                await execPromise('rm -rf extracted/package');
+              }
+              
+              process.chdir('extracted');
 
              // Try to locate package.json in common patterns
              let pkgPath = 'package.json';
-      
-             if (!fs.existsSync(pkgPath)) {
-               // Typical npm pack structure
-               if (fs.existsSync('package/package.json')) {
-                 pkgPath = 'package/package.json';
-               } else {
-                 // Look for any one-level-deep folder containing package.json
-                 const subdirs = fs.readdirSync('.', { withFileTypes: true })
-                  .filter(d => d.isDirectory())
-                  .map(d => d.name);
-          
-                 for (const dir of subdirs) {
-                 const candidate = `${dir}/package.json`;
-                 if (fs.existsSync(candidate)) {
-                   pkgPath = candidate;
-                   break;
+             
+               if (!fs.existsSync(pkgPath)) {
+                 // Typical npm pack structure
+                 if (fs.existsSync('package/package.json')) {
+                   pkgPath = 'package/package.json';
+                 } else {
+                   // Look for any one-level-deep folder containing package.json
+                   const subdirs = fs.readdirSync('.', { withFileTypes: true })
+                    .filter(d => d.isDirectory())
+                    .map(d => d.name);
+            
+                   for (const dir of subdirs) {
+                   const candidate = `${dir}/package.json`;
+                   if (fs.existsSync(candidate)) {
+                     pkgPath = candidate;
+                     break;
+                   }
                  }
                }
              }
-           }
-      
-              // If still not found, show contents for debugging
+             // If still not found, show contents for debugging
               if (!fs.existsSync(pkgPath)) {
                console.log('No package.json found. Directory contents:');
                throw new Error(`No package.json found after extraction for ${name}@${version}`);
               }
-      
               // Read and parse package.json
               const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-      
               // Change working directory to where package.json was found (so publish runs correctly)
               process.chdir(require('path').dirname(pkgPath));
 
