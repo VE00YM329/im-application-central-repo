@@ -39,11 +39,11 @@ jobs:
           echo "Generating complete dependency tree for $PKG_NAME@$VERSION..."
           
           # Install npm-remote-ls globally
-          npm install -g npm-remote-ls
+          npm install @sequre42/npm-remote-ls -g
           
           # Generate flat dependency list
           echo "Running npm-remote-ls..."
-          npm-remote-ls "$PKG_NAME@$VERSION" --development=false -f > deps_raw.txt || true
+          npm-remote-ls "$PKG_NAME@$VERSION" -o -p -i -f > deps_raw.txt || true
           
           # Parse and create dependency list
           cat > parse_deps.js << 'EOF'
