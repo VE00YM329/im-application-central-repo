@@ -246,19 +246,40 @@ jobs:
 
               await execPromise(`mkdir -p extracted && tar -xzf "${tarball}" -C extracted`);
 
-              // Handle typical npm pack structure
-              let pkgRoot = path.join('extracted', 'package');
-              if (!fs.existsSync(path.join(pkgRoot, 'package.json'))) {
-                // fallback: direct extracted/
-                pkgRoot = 'extracted';
-              }
-
-              const pkgPath = path.join(pkgRoot, 'package.json');
+             // Try to locate package.json in common patterns
+             let pkgPath = 'package.json';
+      
+             if (!fs.existsSync(pkgPath)) {
+               // Typical npm pack structure
+               if (fs.existsSync('package/package.json')) {
+                 pkgPath = 'package/package.json';
+               } else {
+                 // Look for any one-level-deep folder containing package.json
+                 const subdirs = fs.readdirSync('.', { withFileTypes: true })
+                  .filter(d => d.isDirectory())
+                  .map(d => d.name);
+          
+                 for (const dir of subdirs) {
+                 const candidate = `${dir}/package.json`;
+                 if (fs.existsSync(candidate)) {
+                   pkgPath = candidate;
+                   break;
+                 }
+               }
+             }
+           }
+      
+              // If still not found, show contents for debugging
               if (!fs.existsSync(pkgPath)) {
-                throw new Error(`No package.json found for ${name}@${version}`);
+               console.log('No package.json found. Directory contents:');
+               throw new Error(`No package.json found after extraction for ${name}@${version}`);
               }
-
+      
+              // Read and parse package.json
               const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      
+              // Change working directory to where package.json was found (so publish runs correctly)
+              process.chdir(require('path').dirname(pkgPath));
 
               const publishedName = getPublishedName(name);
               console.log(`  Original: ${pkg.name}@${pkg.version}`);
