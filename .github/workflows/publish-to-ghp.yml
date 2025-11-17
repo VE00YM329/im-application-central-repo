@@ -318,16 +318,29 @@ jobs:
               console.log('  Publishing to GitHub Packages...');
 
               await execPromise(
-                `npm publish --ignore-scripts --registry=${gprRegistry}`,
+                `npm publish --ignore-scripts --registry=${gprRegistry} --always-auth`,
                 {
-                  cwd: pkgRoot, // ensure we publish from the folder containing package.json
+                  cwd: pkgRoot,
                   env: {
                     ...process.env,
+              
+                    // Required for GitHub Packages authentication
                     NODE_AUTH_TOKEN: authToken,
-                    NPM_CONFIG_REGISTRY: gprRegistry
+                    NPM_TOKEN: authToken,
+              
+                    // Registry settings
+                    NPM_CONFIG_REGISTRY: gprRegistry,
+                    npm_config_registry: gprRegistry,
+              
+                    // Auth settings for GitHub Packages specifically
+                    [`npm_config_//npm.pkg.github.com/:_authToken`]: authToken,
+                    [`npm_config_//registry.npm.pkg.github.com/:_authToken`]: authToken,
+              
+                    npm_config_always_auth: "true"
                   }
                 }
               );
+
 
               console.log('  ✓ Published successfully');
               stats.published++;
