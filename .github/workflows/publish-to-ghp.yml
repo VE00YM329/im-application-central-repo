@@ -280,13 +280,16 @@ jobs:
               
               console.log(`  New package identity: ${pkg.name}@${pkg.version}`);
               
-              function rescopeDeps(deps) {
+              function rescopeDeps(deps, { keepValue = false } = {}) {
                 if (!deps || typeof deps !== 'object') return deps;
+              
                 const rescoped = {};
+              
                 for (const [depName, range] of Object.entries(deps)) {
                   const scopedName = getPublishedName(depName);
-                  rescoped[scopedName] = `${range}`;
+                  rescoped[scopedName] = keepValue ? range : `${range}`;
                 }
+              
                 return rescoped;
               }
               
@@ -294,7 +297,7 @@ jobs:
               pkg.devDependencies = rescopeDeps(pkg.devDependencies);
               pkg.peerDependencies = rescopeDeps(pkg.peerDependencies);
               pkg.optionalDependencies = rescopeDeps(pkg.optionalDependencies);
-              pkg.peerDependenciesMeta = rescopeDeps(pkg.peerDependenciesMeta);
+              pkg.peerDependenciesMeta = rescopeDeps(pkg.peerDependenciesMeta, { keepValue: true });
               
               if (Array.isArray(pkg.bundledDependencies)) {
                 pkg.bundledDependencies = pkg.bundledDependencies.map(d => getPublishedName(d));
