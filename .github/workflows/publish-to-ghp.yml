@@ -126,7 +126,7 @@ jobs:
           function getPublishedName(origName) {
             if (origName.startsWith('@')) {
               const [scope, pkg] = origName.split('/');
-              return `@${owner}/${scope.substring(1)}-${pkg}`.toLowerCase();
+              return `@${owner}/${scope.substring(1)}-p.g-${pkg}`.toLowerCase();
             }
             return `@${owner}/${origName}`.toLowerCase();
           }
