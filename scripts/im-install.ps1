@@ -41,7 +41,7 @@ function Import-DotEnv {
 }
 
 # Load environment variables
-Import-DotEnv -Path "./.env"
+Import-DotEnv -Path "../.env"
 
 # --- CONFIGURATION ---
 $GithubUsername = [Environment]::GetEnvironmentVariable("GITHUB_USER_NAME")
