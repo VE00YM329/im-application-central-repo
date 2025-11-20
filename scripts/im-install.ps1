@@ -1624,7 +1624,7 @@ $stats = @{
 $failedPackages = @()
 
 # Process each top-level package (workflow handles dependencies)
-foreach ($pkg in $packagesToInstall) {
+foreach ($pkg in $packagesToPublish) {
     $success = Invoke-PackagePublishWorkflow -PackageName $pkg.Name -Version $pkg.Version
     if ($success) {
         $stats.Success++
