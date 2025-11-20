@@ -1253,7 +1253,7 @@ function Invoke-PackagePublishWorkflow {
         }
         Write-Host "[LICENSE] All licenses approved!" -ForegroundColor Green
         
-        NODE COMPATIBILITY CHECK
+        # NODE COMPATIBILITY CHECK
         $isCompatible = Test-NodeCompatibility -unscopedPackageName $unscopedPackageName -PackageVersion $Version -NodeEngine $extractedNodeEngine
         if (-not $isCompatible) {
             Write-Host "Proceeding despite compatibility warning..." -ForegroundColor Yellow
