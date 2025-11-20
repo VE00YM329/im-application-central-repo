@@ -1,33 +1,30 @@
-
-
 param(
     [switch]$Uninstall,
     [switch]$Help
 )
 
 function Show-Help {
-    Write-Host "GitHub Package Cache Manager" -ForegroundColor Magenta
+    Write-Host "GitHub Package Cache Manager (Simplified)" -ForegroundColor Magenta
     Write-Host ""
     Write-Host "USAGE:" -ForegroundColor Yellow
     Write-Host "  Install packages:"
-    Write-Host "    .\im-install.ps1 <package1> <package2@version> ..."
-    Write-Host "    .\im-install.ps1                                   # Process all dependencies in package.json"
+    Write-Host "    .\im-install-simplified.ps1 <package1> <package2@version> ..."
+    Write-Host "    .\im-install-simplified.ps1                                   # Process all dependencies in package.json"
     Write-Host ""
     Write-Host "  Uninstall packages:"
-    Write-Host "    .\im-install.ps1 -Uninstall <package1> <package2> ..."
+    Write-Host "    .\im-install-simplified.ps1 -Uninstall <package1> <package2> ..."
     Write-Host ""
     Write-Host "EXAMPLES:" -ForegroundColor Yellow
-    Write-Host "  .\im-install.ps1 axios lodash"
-    Write-Host "  .\im-install.ps1 express@4.18.0"
-    Write-Host "  .\im-install.ps1 -Uninstall axios lodash"
+    Write-Host "  .\im-install-simplified.ps1 axios lodash"
+    Write-Host "  .\im-install-simplified.ps1 express@4.18.0"
+    Write-Host "  .\im-install-simplified.ps1 -Uninstall axios lodash"
     Write-Host ""
-    Write-Host "OPTIONS:" -ForegroundColor Yellow
-    Write-Host "  -Uninstall    Uninstall the specified packages"
-    Write-Host "  -Help         Show this help message"
+    Write-Host "NOTE:" -ForegroundColor Cyan
+    Write-Host "  This version triggers ONE workflow per package, which handles all dependencies automatically."
     Write-Host ""
 }
 
-function Load-DotEnv {
+function Import-DotEnv {
     param([string]$Path = ".env")
     
     if (Test-Path $Path) {
@@ -43,205 +40,95 @@ function Load-DotEnv {
     }
 }
 
-# Load environment variables from .env file if it exists
-Load-DotEnv -Path "./.env"
+# Load environment variables
+Import-DotEnv -Path "./.env"
 
 # --- CONFIGURATION ---
 $GithubUsername = [Environment]::GetEnvironmentVariable("GITHUB_USER_NAME")
 $GithubRepo = [Environment]::GetEnvironmentVariable("GITHUB_REPOSITORY_NAME")
-
-# --- SCRIPT SETUP ---
 $GithubApiUrl = "https://api.github.com/repos/$($GithubUsername)/$($GithubRepo)/actions/workflows/publish-to-ghp.yml/dispatches"
 $GithubToken = [Environment]::GetEnvironmentVariable("GITHUB_PERSONAL_ACCESS_TOKEN")
 
-# At the top of your script or in the function, define allowed licenses
-$allowedLicenses = @(
-    'MIT',
-    'ISC',
-    'Apache-2.0',
-    'BSD-2-Clause',
-    'BSD-3-Clause',
-    'CC-BY-3.0',
-    'CC0-1.0'
-    # Add other licenses you approve
-)
-
 if ([string]::IsNullOrEmpty($GithubToken)) {
     Write-Host "Error: GITHUB_TOKEN environment variable not set." -ForegroundColor Red
-    Write-Host "Please create a Personal Access Token and set it as an environment variable."
     exit 1
 }
+
+$Global:delimiter = "-p.g-"
 
 $headers = @{
     "Authorization" = "token $GithubToken"
     "Accept" = "application/vnd.github.v3+json"
 }
 
-# Helper: Update package.json to ensure unscoped dependency is present with exact version
-function Update-PackageJsonDependency {
-    param(
-        [string]$PackageName,
-        [string]$Version
-    )
-    $pkgPath = Join-Path (Get-Location) 'package.json'
-    if (-not (Test-Path $pkgPath)) { return }
-    try {
-        $jsonRaw = Get-Content $pkgPath -Raw
-        $pkgObj = $jsonRaw | ConvertFrom-Json
-        if (-not $pkgObj.dependencies) { $pkgObj | Add-Member -NotePropertyName dependencies -NotePropertyValue (@{}) }
-        # Remove any scoped variant referencing this base name for our user scope
-        $scopePrefix = "@$GithubUsername/"
-        $toRemove = @()
-        foreach ($prop in $pkgObj.dependencies.PSObject.Properties) {
-            if ($prop.Name -eq "$scopePrefix$PackageName") { $toRemove += $prop.Name }
-        }
-        foreach ($r in $toRemove) { $pkgObj.dependencies.PSObject.Properties.Remove($r) }
-        $pkgObj.dependencies.PSObject.Properties.Remove($PackageName) | Out-Null 2>$null
-        $pkgObj.dependencies | Add-Member -NotePropertyName $PackageName -NotePropertyValue $Version
-        ConvertTo-Json $pkgObj -Depth 10 | Format-Json | Set-Content $pkgPath -Encoding UTF8
+$allowedLicenses = @(
+    'AFL-2.1',
+    'Apache-2.0',
+    'BSD',
+    'BSD-2-Clause',
+    'BSD-3-Clause',
+    'CC0-1.0',
+    'CC-BY-3.0',
+    'ISC',
+    'LGPL-3.0',
+    'MIT',
+    'Unicode-DFS-2016',
+    'Unlicensed'
+)
 
-        Write-Host "package.json updated: $PackageName@$Version (unscoped)" -ForegroundColor DarkGreen
-    } catch {
-        Write-Warning "Failed to update package.json: $($_.Exception.Message)"
+# Global caches
+$Global:VersionCache = @{}
+
+#region Utility Functions
+
+function Get-PublishedName {
+    param([string]$origName, [string]$owner)
+    
+    if ($origName.StartsWith("@")) {
+        $parts = $origName.Split("/")
+        $scope = $parts[0].Substring(1)
+        $pkg = $parts[1]
+        return "@$owner/$scope$Global:delimiter$pkg".ToLower()
     }
+    return "@$owner/$origName".ToLower()
 }
 
-# Helper: Remove dependency from package.json
-function Remove-PackageJsonDependency {
-    param(
-        [string]$PackageName
-    )
-    $pkgPath = Join-Path (Get-Location) 'package.json'
-    if (-not (Test-Path $pkgPath)) { 
-        Write-Warning "package.json not found, skipping package.json cleanup"
-        return 
-    }
-    try {
-        $jsonRaw = Get-Content $pkgPath -Raw
-        $pkgObj = $jsonRaw | ConvertFrom-Json
-        
-        $removed = $false
-        
-        # Remove from dependencies
-        if ($pkgObj.dependencies -and $pkgObj.dependencies.PSObject.Properties[$PackageName]) {
-            $pkgObj.dependencies.PSObject.Properties.Remove($PackageName)
-            $removed = $true
-        }
-        
-        # Remove from devDependencies
-        if ($pkgObj.devDependencies -and $pkgObj.devDependencies.PSObject.Properties[$PackageName]) {
-            $pkgObj.devDependencies.PSObject.Properties.Remove($PackageName)
-            $removed = $true
-        }
-        
-        # Remove scoped variant
-        $scopePrefix = "@$GithubUsername/"
-        $scopedName = "$scopePrefix$PackageName"
-        if ($pkgObj.dependencies -and $pkgObj.dependencies.PSObject.Properties[$scopedName]) {
-            $pkgObj.dependencies.PSObject.Properties.Remove($scopedName)
-            $removed = $true
-        }
-        if ($pkgObj.devDependencies -and $pkgObj.devDependencies.PSObject.Properties[$scopedName]) {
-            $pkgObj.devDependencies.PSObject.Properties.Remove($scopedName)
-            $removed = $true
-        }
-        
-        if ($removed) {
-            ConvertTo-Json $pkgObj -Depth 10 | Format-Json | Set-Content $pkgPath -Encoding UTF8
-            Write-Host "Removed $PackageName from package.json" -ForegroundColor DarkGreen
-        } else {
-            Write-Host "$PackageName was not found in package.json" -ForegroundColor Gray
-        }
-    } catch {
-        Write-Warning "Failed to update package.json: $($_.Exception.Message)"
-    }
-}
-
-# Helper: Create an unscoped alias (symlink or copy) so require('pkg') works when only @user/pkg is installed
-function Ensure-UnscopedAlias {
-    param(
-        [string]$PackageName
-    )
-    $scopedDir = Join-Path (Join-Path (Get-Location) 'node_modules') "@$GithubUsername"
-    $scopedPath = Join-Path $scopedDir $PackageName
-    $unscopedPath = Join-Path (Join-Path (Get-Location) 'node_modules') $PackageName
-    if (-not (Test-Path $scopedPath)) { return }
-    if (Test-Path $unscopedPath) { return }
-    try {
-        New-Item -ItemType SymbolicLink -Path $unscopedPath -Target $scopedPath -ErrorAction Stop | Out-Null
-        Write-Host "Created symlink alias: $unscopedPath -> $scopedPath" -ForegroundColor Gray
-    } catch {
-        try {
-            Copy-Item $scopedPath $unscopedPath -Recurse -Force
-            Write-Host "Copied directory as alias: $unscopedPath" -ForegroundColor Gray
-        } catch {
-            Write-Warning "Could not create alias: $($_.Exception.Message)"
-        }
-    }
-}
-
-# Helper: Remove unscoped alias when uninstalling
-function Remove-UnscopedAlias {
-    param(
-        [string]$PackageName
-    )
-    $unscopedPath = Join-Path (Join-Path (Get-Location) 'node_modules') $PackageName
-    if (Test-Path $unscopedPath) {
-        try {
-            # Check if it's a symlink or junction
-            $item = Get-Item $unscopedPath -Force
-            if ($item.LinkType -eq "SymbolicLink" -or $item.LinkType -eq "Junction") {
-                Remove-Item $unscopedPath -Force
-                Write-Host "Removed symlink alias: $unscopedPath" -ForegroundColor Gray
-            } else {
-                # It's a copied directory, remove it
-                Remove-Item $unscopedPath -Recurse -Force
-                Write-Host "Removed copied alias directory: $unscopedPath" -ForegroundColor Gray
-            }
-        } catch {
-            Write-Warning "Could not remove alias: $($_.Exception.Message)"
-        }
-    }
-}
-
-function Get-PackageVersion {
-    param(
-        [string]$PackageName,
-        [string]$VersionSpec = "latest"
+function Format-Json {
+    [CmdletBinding(DefaultParameterSetName = 'Prettify')]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [string]$Json,
+        [Parameter(ParameterSetName = 'Minify')]
+        [switch]$Minify,
+        [Parameter(ParameterSetName = 'Prettify')]
+        [ValidateRange(1, 1024)]
+        [int]$Indentation = 2
     )
     
-    try {
-        # Always query the public registry to resolve the specifier to a concrete version.
-        # This handles 'latest', '1.8.0', '^1.8.0', etc., consistently.
-        $packageWithSpec = "$($PackageName)@$($VersionSpec)"
-        Write-Host "Resolving version for '$($packageWithSpec)' from public npm registry..." -ForegroundColor Gray
-
-        $registryUrl = $PackageName | Select-String -Pattern $GithubUsername -Quiet
-        if ($registryUrl) {
-            $registryUrl = "https://npm.pkg.github.com/$($GithubUsername)"
-        } else {
-            $registryUrl = "https://registry.npmjs.org/"
-        }
-        $versionOutput = npm view $packageWithSpec version --registry=$registryUrl 2>$null | Select-Object -Last 1
-
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrEmpty($versionOutput)) {
-            # The command can sometimes return the version in quotes, so we trim everything.
-            $resolved = $versionOutput.Trim().Trim("'").Trim('"')
-            Write-Host "Resolved '$($packageWithSpec)' to concrete version: $($resolved)" -ForegroundColor DarkGray
-            return $resolved
-        } else {
-            # If resolution fails on the public registry, the package/version likely doesn't exist at all.
-            Write-Host "Error: Could not resolve version specifier '$($VersionSpec)' for package '$($PackageName)' from npmjs.org." -ForegroundColor Red
-            return $VersionSpec # Fallback to the original spec, though it's likely to fail later.
-        }
+    if ($Minify) {
+        return ($Json | ConvertFrom-Json) | ConvertTo-Json -Depth 100 -Compress
     }
-    catch {
-        Write-Host "Error during version resolution for $PackageName : $($_.Exception.Message)" -ForegroundColor Red
-        return $VersionSpec
+    
+    if ($Json -notmatch '\r?\n') {
+        $Json = ($Json | ConvertFrom-Json) | ConvertTo-Json -Depth 100
     }
+    
+    $indent = 0
+    $regexUnlessQuoted = '(?=([^"]*"[^"]*")*[^"]*$)'
+    $result = ($Json -split '\r?\n' | ForEach-Object {
+        if (($_ -match "[}\]]$regexUnlessQuoted") -and ($_ -notmatch "[\{\[]$regexUnlessQuoted")) {
+            $indent = [Math]::Max($indent - $Indentation, 0)
+        }
+        $line = (' ' * $indent) + ($_.TrimStart() -replace ":\s+$regexUnlessQuoted", ': ')
+        if (($_ -match "[\{\[]$regexUnlessQuoted") -and ($_ -notmatch "[}\]]$regexUnlessQuoted")) {
+            $indent += $Indentation
+        }
+        $line -replace '\\u0027', "'"
+    }) -join [Environment]::NewLine -replace '(\[)\s+(\])', '$1$2' -replace '(\{)\s+(\})', '$1$2'
+    
+    return $result
 }
 
-# Suggest alternative non-deprecated versions when a requested version is deprecated or unavailable
 function Get-AlternativeVersions {
     param(
         [string]$PackageName,
@@ -275,118 +162,74 @@ function Write-VersionSuggestions {
     if ($alts.Count -gt 0) {
         Write-Host "Suggested alternative versions for $PackageName (problem with $ProblemVersion):" -ForegroundColor Yellow
         Write-Host ("  " + ($alts -join ", ")) -ForegroundColor Yellow
-        Write-Host "Try: npm run im-install -- $PackageName@$($alts[0])" -ForegroundColor DarkYellow
     } else {
         Write-Host "No alternative version suggestions available for $PackageName right now." -ForegroundColor Yellow
     }
 }
 
-function Check-WorkflowStatus {
-    param(
-        [string]$PackageName
-    )
+#endregion
+
+#region License Validation
+
+function Test-LicenseExpression {
+    param([string]$Expression)
     
-    $workflowRunsUrl = "https://api.github.com/repos/$($GithubUsername)/$($GithubRepo)/actions/runs"
+    $cleanExpression = $Expression -replace '[()]', '' -replace '\s+', ' '
     
-    try {
-        $runs = Invoke-RestMethod -Uri $workflowRunsUrl -Headers $headers
-        $recentRuns = $runs.workflow_runs | Where-Object { 
-            $_.name -eq "Publish to GitHub Packages with Caching" -and 
-            $_.created_at -gt (Get-Date).AddMinutes(-10) 
-        } | Select-Object -First 3
-        
-        if ($recentRuns.Count -gt 0) {
-            $latestRun = $recentRuns[0]
-            Write-Host "Latest workflow status: $($latestRun.status) - $($latestRun.conclusion)" -ForegroundColor Cyan
-            if ($latestRun.status -eq "in_progress") {
-                Write-Host "Workflow is still running. You can monitor it at: $($latestRun.html_url)" -ForegroundColor Yellow
+    if ($cleanExpression -match ' OR ') {
+        $licenses = $cleanExpression -split ' OR ' | ForEach-Object { $_.Trim() }
+        foreach ($license in $licenses) {
+            if (Test-LicenseExpression -Expression $license) {
+                return $true
             }
         }
-    }
-    catch {
-        Write-Host "Could not check workflow status (this is not critical)" -ForegroundColor Yellow
-    }
-}
-
-function Wait-For-Workflow {
-    param(
-        [string]$WorkflowFileName,
-        [string]$PackageName
-    )
-
-    Write-Host "Waiting for caching workflow for '$($PackageName)' to complete..." -ForegroundColor Yellow
-    
-    # Give GitHub a moment to create the workflow run
-    Start-Sleep -Seconds 3
-
-    try {
-        # Find the specific workflow run that was just triggered for our package
-        $runsUrl = "https://api.github.com/repos/$($GithubUsername)/$($GithubRepo)/actions/workflows/$($WorkflowFileName)/runs?event=workflow_dispatch"
-        $workflowRuns = Invoke-RestMethod -Uri $runsUrl -Headers $headers
-        $latestRun = $workflowRuns.workflow_runs | Sort-Object -Property created_at -Descending | Select-Object -First 1
-
-        if (-not $latestRun) {
-            Write-Host "Error: Could not find the triggered workflow run." -ForegroundColor Red
-            return $false
-        }
-
-        Write-Host "Monitoring workflow run: $($latestRun.html_url)" -ForegroundColor Cyan
-        
-        $runId = $latestRun.id
-        $status = $latestRun.status
-        $conclusion = $latestRun.conclusion
-        $timeout = (Get-Date).AddMinutes(1) # 1-minute timeout
-
-        # Poll the API until the workflow is 'completed' or we time out
-        while ($status -ne "completed" -and (Get-Date) -lt $timeout) {
-            Write-Host "Current status: $($status)... waiting..." -ForegroundColor Gray
-            Start-Sleep -Seconds 3
-            
-            $runUrl = "https://api.github.com/repos/$($GithubUsername)/$($GithubRepo)/actions/runs/$($runId)"
-            $runDetails = Invoke-RestMethod -Uri $runUrl -Headers $headers
-            $status = $runDetails.status
-            $conclusion = $runDetails.conclusion
-        }
-
-        if ($status -ne "completed") {
-            Write-Host "Timed out waiting for workflow to complete." -ForegroundColor Red
-            return $false
-        }
-
-        if ($conclusion -eq 'success') {
-            Write-Host "Workflow finished with conclusion: '$($conclusion)'" -ForegroundColor Green
-        } else {
-            Write-Host "Workflow finished with conclusion: '$($conclusion)'" -ForegroundColor Red
-        }
-        Start-Sleep -Seconds 3
-        return ($conclusion -eq "success")
-    }
-    catch {
-        Write-Host "An error occurred while monitoring the workflow: $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
-}
-
-function Parse-VersionFromPackageJson {
-    param(
-        [string]$VersionSpec
-    )
     
-    # Remove common version prefixes like ^, ~, >=, etc.
-    $cleanVersion = $VersionSpec -replace '^[\^~>=<]+', ''
-    
-    # If it's a complex version range, default to latest
-    if ($cleanVersion -match '[*x]' -or $cleanVersion -match '\|\|' -or $cleanVersion -match ' - ') {
-        return "latest"
+    if ($cleanExpression -match ' AND ') {
+        $licenses = $cleanExpression -split ' AND ' | ForEach-Object { $_.Trim() }
+        foreach ($license in $licenses) {
+            if (-not (Test-LicenseExpression -Expression $license)) {
+                return $false
+            }
+        }
+        return $true
     }
     
-    return $cleanVersion
+    return $allowedLicenses -contains $cleanExpression.Trim()
 }
 
-function Check-NodeCompatibility {
+function Get-PackageLicense {
+    param(
+        [string]$PackageName,
+        [string]$Version
+    )
+    
+    $cacheKey = "$PackageName@$Version"
+    if ($Global:LicenseCache.ContainsKey($cacheKey)) {
+        return $Global:LicenseCache[$cacheKey]
+    }
+    
+    try {
+        $license = npm view "$PackageName@$Version" license --registry=https://registry.npmjs.org/ 2>$null
+        if ($license) {
+            $Global:LicenseCache[$cacheKey] = $license
+            return $license
+        }
+    } catch {}
+    
+    return "UNKNOWN"
+}
+
+#endregion
+
+#region Node Compatibility
+
+function Test-NodeCompatibility {
     param (
         [string]$PackageName,
-        [string]$PackageVersion = "latest"
+        [string]$PackageVersion = "latest",
+        [string]$NodeEngine = $null
     )
 
     # Check if Node.js is available
@@ -408,7 +251,6 @@ function Check-NodeCompatibility {
         
         $currentNodeVersion = $currentNodeVersionRaw -replace '^v', ''
         $currentVer = [System.Version]::Parse($currentNodeVersion)
-        Write-Host "Current Node.js version: $currentNodeVersion" -ForegroundColor Gray
     }
     catch {
         Write-Warning "Could not parse Node.js version: $currentNodeVersionRaw"
@@ -417,7 +259,7 @@ function Check-NodeCompatibility {
 
     try {
         # Get the engines.node field - handle both string and object responses
-        $enginesNodeRaw = npm view "$PackageName@$PackageVersion" engines.node --json --registry=https://registry.npmjs.org/ 2>$null
+        $enginesNodeRaw = if ($NodeEngine) { $NodeEngine } else { npm view "$PackageName@$PackageVersion" engines.node --json --registry=https://registry.npmjs.org/ 2>$null }
         
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($enginesNodeRaw) -or $enginesNodeRaw -eq "undefined") {
             Write-Host "No Node.js engine constraints found for $PackageName@$PackageVersion" -ForegroundColor Gray
@@ -454,674 +296,1390 @@ function Check-NodeCompatibility {
 }
 
 function Test-NodeVersionConstraint {
-    param(
+    param (
+        [Parameter(Mandatory)]
         [System.Version]$CurrentVersion,
+
+        [Parameter(Mandatory)]
         [string]$Constraint
     )
-    
-    # Handle range constraints like ">=14.0.0 <17.0.0" or ">=16"
-    if ($Constraint -match '\s+') {
-        $constraints = $Constraint -split '\s+'
-        foreach ($c in $constraints) {
-            $c = $c.Trim()
-            if (-not [string]::IsNullOrEmpty($c) -and -not (Test-SingleVersionConstraint -CurrentVersion $CurrentVersion -Constraint $c)) {
-                return $false
+
+    # Helper: safely convert version string to System.Version
+    function ConvertTo-Version($v) {
+        # Remove invalid characters (^, ~, x, etc.)
+        $v = $v -replace '[^\d\.]', ''
+        if ([string]::IsNullOrWhiteSpace($v)) { return $null }
+
+        # Split and normalize: cap to 4 parts
+        $parts = $v.Split('.')
+        $normalized = @()
+
+        foreach ($p in $parts) {
+            if ($p -match '^\d+$') { $normalized += [int]$p }
+            else { $normalized += 0 }
+        }
+
+        while ($normalized.Count -lt 3) { $normalized += 0 }
+        if ($normalized.Count -gt 4) { $normalized = $normalized[0..3] }
+
+        # Join safely into a string and parse
+        $verString = ($normalized -join '.')
+        try { return [System.Version]::Parse($verString) }
+        catch { return $null }
+    }
+
+
+    # Split OR groups: e.g. ">=14 <16 || >=18"
+    $orGroups = $Constraint -split '\|\|'
+
+    foreach ($group in $orGroups) {
+        $andConditions = [regex]::Matches($group, '([><=~^]*\s*[\d\.x]+)') | ForEach-Object { $_.Value.Trim() }
+        $allMatch = $true
+
+        foreach ($cond in $andConditions) {
+            if ([string]::IsNullOrWhiteSpace($cond)) { continue }
+
+            # Extract operator and version part
+            if ($cond -match '^([><=~^]*)([\d\.x]+)$') {
+                $op = $matches[1]
+                $verPart = $matches[2]
+            } else {
+                continue
+            }
+
+            $ver = ConvertTo-Version $verPart
+            if (-not $ver) { continue }
+            switch -Regex ($op) {
+
+                '^>=$' {  if ($CurrentVersion.CompareTo($ver) -lt 0) { $allMatch = $false; } }
+                '^<=$' {  if ($CurrentVersion.CompareTo($ver) -gt 0) { $allMatch = $false; } }
+                '^>$'  { if ($CurrentVersion.CompareTo($ver) -le 0) { $allMatch = $false;  } }
+                '^<$'  { if ($CurrentVersion.CompareTo($ver) -ge 0) { $allMatch = $false;  } }
+                '^\^'  { if ($CurrentVersion.Major -ne $ver.Major -or $CurrentVersion.CompareTo($ver) -lt 0) { $allMatch = $false; } }
+                '^~'   { if ($CurrentVersion.Major -ne $ver.Major -or $CurrentVersion.Minor -ne $ver.Minor -or $CurrentVersion.CompareTo($ver) -lt 0) { $allMatch = $false; } }
+                'x'    { if ($CurrentVersion.Major -ne $ver.Major) { $allMatch = $false } }
+                default {
+                    # Exact match
+                    if ($CurrentVersion.Major -ne $ver.Major -or
+                        $CurrentVersion.Minor -ne $ver.Minor -or
+                        $CurrentVersion.Build -ne $ver.Build) {
+                        $allMatch = $false
+                        write-Host "Exact version mismatch: $CurrentVersion vs $ver" -ForegroundColor Gray
+                    }
+                }
             }
         }
-        return $true
+
+        if ($allMatch) { return $true }  # one OR-group passes
     }
-    else {
-        return Test-SingleVersionConstraint -CurrentVersion $CurrentVersion -Constraint $Constraint
+
+    return $false
+}
+
+#endregion
+
+#region Package.json Management
+
+function Remove-PackageJsonDependency {
+    param([string]$PackageName)
+    
+    $pkgPath = Join-Path (Get-Location) 'package.json'
+    if (-not (Test-Path $pkgPath)) { 
+        Write-Warning "package.json not found"
+        return 
+    }
+    
+    try {
+        $pkgObj = Get-Content $pkgPath -Raw | ConvertFrom-Json
+        $removed = $false
+        
+        $sections = @('dependencies', 'devDependencies')
+        foreach ($section in $sections) {
+            if ($pkgObj.$section -and $pkgObj.$section.PSObject.Properties[$PackageName]) {
+                $pkgObj.$section.PSObject.Properties.Remove($PackageName)
+                $removed = $true
+            }
+        }
+        
+        if ($pkgObj.frontendDependencies -and $pkgObj.frontendDependencies.packages) {
+            if ($pkgObj.frontendDependencies.packages.PSObject.Properties[$PackageName]) {
+                $pkgObj.frontendDependencies.packages.PSObject.Properties.Remove($PackageName)
+                $removed = $true
+            }
+        }
+        
+        if (-not $PackageName.StartsWith("@")) {
+            $scopedName = "@$GithubUsername/$PackageName"
+            foreach ($section in $sections) {
+                if ($pkgObj.$section -and $pkgObj.$section.PSObject.Properties[$scopedName]) {
+                    $pkgObj.$section.PSObject.Properties.Remove($scopedName)
+                    $removed = $true
+                }
+            }
+            if ($pkgObj.frontendDependencies -and $pkgObj.frontendDependencies.packages) {
+                if ($pkgObj.frontendDependencies.packages.PSObject.Properties[$scopedName]) {
+                    $pkgObj.frontendDependencies.packages.PSObject.Properties.Remove($scopedName)
+                    $removed = $true
+                }
+            }
+        }
+        
+        if ($removed) {
+            ConvertTo-Json $pkgObj -Depth 10 | Format-Json | Set-Content $pkgPath -Encoding UTF8
+            Write-Host "Removed $PackageName from package.json" -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "Failed to update package.json: $($_.Exception.Message)"
     }
 }
 
-function Test-SingleVersionConstraint {
-    param(
-        [System.Version]$CurrentVersion,
-        [string]$Constraint
-    )
-    
-    # Parse version constraint patterns
-    if ($Constraint -match '^(>=|<=|>|<|=|~|\^)?\s*([0-9]+(?:\.[0-9]+)?(?:\.[0-9]+)?)?(.*)$') {
-        $operator = if ($matches[1]) { $matches[1] } else { "=" }
-        $versionStr = $matches[2]
-        # If versionStr is empty, skip parsing and return true
-        if (-not $versionStr) {
-            # No version specified after operator, treat as unconstrained
-            return $true
-        }
-        # Handle incomplete version numbers (e.g., "14" -> "14.0.0")
-        $versionParts = $versionStr -split '\.'
-        while ($versionParts.Length -lt 3) {
-            $versionParts += "0"
-        }
-        $normalizedVersion = $versionParts[0..2] -join '.'
-        try {
-            $targetVer = [System.Version]::Parse($normalizedVersion)
-        }
-        catch {
-            Write-Warning "Could not parse version constraint: $Constraint"
-            return $true
-        }
-        switch ($operator) {
-            ">=" { 
-                return $CurrentVersion -ge $targetVer
-            }
-            "<=" { 
-                return $CurrentVersion -le $targetVer
-            }
-            ">" { 
-                return $CurrentVersion -gt $targetVer
-            }
-            "<" { 
-                return $CurrentVersion -lt $targetVer
-            }
-            "=" { 
-                return $CurrentVersion -eq $targetVer
-            }
-            "~" {
-                if ($versionParts.Length -ge 2) {
-                    $nextMinor = [System.Version]::new($targetVer.Major, $targetVer.Minor + 1, 0)
-                    return ($CurrentVersion -ge $targetVer) -and ($CurrentVersion -lt $nextMinor)
-                }
-                else {
-                    $nextMajor = [System.Version]::new($targetVer.Major + 1, 0, 0)
-                    return ($CurrentVersion -ge $targetVer) -and ($CurrentVersion -lt $nextMajor)
-                }
-            }
-            "^" {
-                if ($targetVer.Major -gt 0) {
-                    $nextMajor = [System.Version]::new($targetVer.Major + 1, 0, 0)
-                    return ($CurrentVersion -ge $targetVer) -and ($CurrentVersion -lt $nextMajor)
-                }
-                elseif ($targetVer.Minor -gt 0) {
-                    $nextMinor = [System.Version]::new($targetVer.Major, $targetVer.Minor + 1, 0)
-                    return ($CurrentVersion -ge $targetVer) -and ($CurrentVersion -lt $nextMinor)
-                }
-                else {
-                    $nextPatch = [System.Version]::new($targetVer.Major, $targetVer.Minor, $targetVer.Build + 1)
-                    return ($CurrentVersion -ge $targetVer) -and ($CurrentVersion -lt $nextPatch)
-                }
-            }
-            default {
-                Write-Warning "Unrecognized version operator: $operator"
-                return $true
-            }
-        }
-    }
-    else {
-        Write-Warning "Could not parse version constraint: $Constraint"
-        return $true
-    }
-}
-
-function Process-Package {
+function Update-PackageJsonDependencyInCorrectSection {
     param(
         [string]$PackageName,
-    [string]$VersionSpec = "latest",
-    [switch]$Recurse,
-    [switch]$NoLicenseRecursion
+        [string]$Version
     )
 
-    if (-not $Global:ProcessedPackages) { $Global:ProcessedPackages = @{} }
+    $pkgPath = Join-Path (Get-Location) 'package.json'
+    if (-not (Test-Path $pkgPath)) { return }
 
-    Write-Host "`n--- Processing package: $($PackageName)@$($VersionSpec) ---" -ForegroundColor Cyan
+    try {
+        $pkgObj = Get-Content $pkgPath -Raw | ConvertFrom-Json
+        $lowerUser = $GithubUsername.ToLower()
+        $aliasValue = "@$lowerUser/$PackageName@$Version"
+        $scopedName = "@$lowerUser/$PackageName"
 
-    # Short-circuit if we've already processed this exact spec (pre-version resolution) to avoid redundant network calls
-    $preKey = "PRE::$PackageName@$VersionSpec"
-    if ($Global:ProcessedPackages.ContainsKey($preKey)) {
-        Write-Host "Already handled (spec): $PackageName@$VersionSpec" -ForegroundColor DarkGray
-        return $true
-    }
-    
-    # Resolve concrete version FIRST so later checks reference the right version
-    $ConcreteVersion = Get-PackageVersion -PackageName $PackageName -VersionSpec $VersionSpec
-    if (-not $ConcreteVersion) {
-        Write-Host "Could not resolve package version, cannot proceed." -ForegroundColor Red
-        return $false
-    }
+        $isInFrontendDeps = $false
+        if ($pkgObj.frontendDependencies -and
+            $pkgObj.frontendDependencies.packages -and
+            $pkgObj.frontendDependencies.packages.PSObject.Properties[$PackageName]) {
+            $isInFrontendDeps = $true
+        }
 
-    # Short-circuit if we've already processed this resolved version
-    $resolvedKey = "RES::$PackageName@$ConcreteVersion"
-    if ($Global:ProcessedPackages.ContainsKey($resolvedKey)) {
-        Write-Host "Already handled (resolved): $PackageName@$ConcreteVersion" -ForegroundColor DarkGray
-        return $true
-    }
-
-    $Global:ProcessedPackages[$preKey] = $true
-    $Global:ProcessedPackages[$resolvedKey] = $true
-
-    $deprecationMessage = npm view "${PackageName}@${ConcreteVersion}" deprecated --registry=https://registry.npmjs.org/
-    if (-not [string]::IsNullOrEmpty($deprecationMessage)) {
-        Write-Warning "This package version is deprecated. Message: $deprecationMessage"
-        Write-Host "Consider using a different version or package." -ForegroundColor Yellow
-        Write-VersionSuggestions -PackageName $PackageName -ProblemVersion $ConcreteVersion
-    }
-
-    # Step 1: Check if the package is already in the GitHub Packages cache
-    $ScopedPackageNameWithVersion = "@$GithubUsername/$PackageName@$ConcreteVersion"
-    $versionExists = (npm view $ScopedPackageNameWithVersion versions --silent) | Select-String -Pattern $ConcreteVersion -Quiet
-
-    if ($versionExists) {
-        Write-Host "Package found in GitHub Packages cache." -ForegroundColor Green
-        # Optionally: install or return true here, skipping license check
-        return $true
-    }
-
-    # Only perform license check if not already cached
-    $packageLicense = npm view "${PackageName}@${ConcreteVersion}" license --registry=https://registry.npmjs.org/
-    Write-Host "[LICENSE] Top-level license for $PackageName@$ConcreteVersion : $packageLicense" -ForegroundColor Cyan
-    if (-not ($allowedLicenses -contains $packageLicense)) {
-        Write-Error "LICENSE VIOLATION: The license '$($packageLicense)' for $($PackageName)@$($ConcreteVersion) is not on the approved list. Halting installation."
-        return $false
-    }
-
-    function Check-DependencyLicenses {
-        param(
-            [string]$RootPackage,
-            [string]$RootVersion
-        )
-        $checked = @{}
-        function CheckRecursively {
-            param(
-                [string]$Pkg,
-                [string]$Ver
-            )
-            $key = "$Pkg@$Ver"
-            if ($checked.ContainsKey($key)) { return $true }
-            $checked[$key] = $true
-            Write-Host "Checking license for $Pkg @ $Ver ..." -ForegroundColor Cyan
-            $depLicense = npm view "$Pkg@$Ver" license --registry=https://registry.npmjs.org/
-            Write-Host "  License for $Pkg @ $Ver : $depLicense" -ForegroundColor Cyan
-            if (-not ($allowedLicenses -contains $depLicense)) {
-                Write-Error "LICENSE VIOLATION: The license '$($depLicense)' for dependency $Pkg@$Ver is not on the approved list. Halting installation."
-                return $false
+        if ($isInFrontendDeps) {
+            # Update frontendDependencies
+            $pkgObj.frontendDependencies.packages.$PackageName.version = $aliasValue
+            # Remove scoped name from dependencies if npm added it
+            if ($pkgObj.dependencies) {
+                $pkgObj.dependencies.PSObject.Properties.Remove($scopedName) | Out-Null
             }
-            $deps = npm view "$Pkg@$Ver" dependencies --json --registry=https://registry.npmjs.org/
-            if (-not [string]::IsNullOrEmpty($deps) -and $deps -ne 'undefined') {
-                try {
-                    $depObj = $deps | ConvertFrom-Json
-                    # Handle both hashtable/object and array cases robustly
-                    if ($depObj -eq $null) {
-                        Write-Host "  No subdependencies for $Pkg@$Ver (null)" -ForegroundColor Gray
-                    } elseif ($depObj.PSObject.Properties.Count -gt 0) {
-                        $depKeys = $depObj.PSObject.Properties.Name
-                        Write-Host "  Found $($depKeys.Count) subdependencies for $Pkg@$Ver : $($depKeys -join ', ')" -ForegroundColor Yellow
-                        foreach ($depName in $depKeys) {
-                            $depVerSpec = $depObj.$depName
-                            Write-Host "    Recursing into $depName@$depVerSpec (dependency of $Pkg@$Ver)" -ForegroundColor DarkYellow
-                            $depVer = Get-PackageVersion -PackageName $depName -VersionSpec $depVerSpec
-                            if (-not (CheckRecursively -Pkg $depName -Ver $depVer)) {
-                                return $false
-                            }
-                        }
-                    } elseif ($depObj -is [System.Collections.IEnumerable]) {
-                        $depArr = @($depObj)
-                        if ($depArr.Count -eq 0) {
-                            Write-Host "  No subdependencies for $Pkg@$Ver (empty array)" -ForegroundColor Gray
+        } else {
+            # Ensure dependencies section exists
+            if (-not $pkgObj.dependencies) {
+                $pkgObj | Add-Member -NotePropertyName dependencies -NotePropertyValue ([PSCustomObject]@{})
+            }
+            
+            # Check if package already exists in alias format
+            $alreadyHasAlias = $null -ne $pkgObj.dependencies.PSObject.Properties[$PackageName]
+            
+            # Check if npm added it in scoped format
+            $npmAddedScoped = $null -ne $pkgObj.dependencies.PSObject.Properties[$scopedName]
+            
+            if ($npmAddedScoped) {
+                # Remove that and add in alias format
+                $pkgObj.dependencies.PSObject.Properties.Remove($scopedName) | Out-Null
+                $pkgObj.dependencies | Add-Member -NotePropertyName $PackageName -NotePropertyValue $aliasValue -Force
+            } elseif (-not $alreadyHasAlias) {
+                # Package doesn't exist at all, add it in alias format
+                $pkgObj.dependencies | Add-Member -NotePropertyName $PackageName -NotePropertyValue $aliasValue -Force
+            } else {
+                # Already exists in alias format, just update the version
+                $pkgObj.dependencies.$PackageName = $aliasValue
+            }
+        }
+        
+        ConvertTo-Json $pkgObj -Depth 10 | Format-Json | Set-Content $pkgPath -Encoding UTF8
+    } catch {
+        Write-Warning "Failed to update package.json: $($_.Exception.Message)"
+    }
+}
+
+function Convert-ToScopedFormat {
+    <#
+    .SYNOPSIS
+    Converts package.json to scoped format: "@username/packagename": "version"
+    This is done BEFORE installation to ensure npm can find packages in GitHub registry
+    #>
+    param([string]$Owner = $GithubUsername.ToLower())
+    
+    $pkgPath = Join-Path (Get-Location) "package.json"
+    if (-not (Test-Path $pkgPath)) {
+        Write-Warning "package.json not found"
+        return $false
+    }
+
+    try {
+        $json = Get-Content $pkgPath -Raw | ConvertFrom-Json
+        $modified = $false
+
+        # Process dependencies
+        if ($json.dependencies) {
+            $newDeps = [ordered]@{}
+            foreach ($prop in $json.dependencies.PSObject.Properties) {
+                $pkgName = $prop.Name
+                $ver = $prop.Value
+
+                # Skip if already in scoped format
+                if ($pkgName.StartsWith("@$Owner/")) {
+                    $newDeps[$pkgName] = $ver
+                    continue
+                }
+
+                # Extract version from alias format if present
+                if ($ver -match "npm:@$Owner/[^@]+@(.+)$") {
+                    $ver = $matches[1]
+                    $modified = $true
+                } elseif ($ver -match "@$Owner/[^@]+@(.+)$") {
+                    $ver = $matches[1]
+                    $modified = $true
+                }
+
+                # Convert to scoped format
+                $scopedName = "@$Owner/$pkgName"
+                $newDeps[$scopedName] = $ver
+                $modified = $true
+            }
+            
+            # Replace dependencies object
+            $json.dependencies = [PSCustomObject]$newDeps
+        }
+
+        # Process devDependencies
+        if ($json.devDependencies) {
+            $newDevDeps = [ordered]@{}
+            foreach ($prop in $json.devDependencies.PSObject.Properties) {
+                $pkgName = $prop.Name
+                $ver = $prop.Value
+
+                if ($pkgName.StartsWith("@$Owner/")) {
+                    $newDevDeps[$pkgName] = $ver
+                    continue
+                }
+
+                if ($ver -match "npm:@$Owner/[^@]+@(.+)$") {
+                    $ver = $matches[1]
+                    $modified = $true
+                } elseif ($ver -match "@$Owner/[^@]+@(.+)$") {
+                    $ver = $matches[1]
+                    $modified = $true
+                }
+
+                $scopedName = "@$Owner/$pkgName"
+                $newDevDeps[$scopedName] = $ver
+                $modified = $true
+            }
+            
+            $json.devDependencies = [PSCustomObject]$newDevDeps
+        }
+
+        # Process frontendDependencies
+        if ($json.frontendDependencies -and $json.frontendDependencies.packages) {
+            foreach ($prop in $json.frontendDependencies.packages.PSObject.Properties) {
+                $pkgName = $prop.Name
+                $verObj = $json.frontendDependencies.packages.$pkgName
+
+                if (-not $verObj.version) { continue }
+                
+                # Skip if already in scoped format
+                if ($pkgName.StartsWith("@$Owner/")) { continue }
+
+                $currentVer = $verObj.version
+                
+                # Extract version from alias format if present
+                if ($currentVer -match "npm:@$Owner/[^@]+@(.+)$") {
+                    $currentVer = $matches[1]
+                    $modified = $true
+                } elseif ($currentVer -match "@$Owner/[^@]+@(.+)$") {
+                    $currentVer = $matches[1]
+                    $modified = $true
+                }
+
+                # Update to scoped format
+                $verObj.version = $currentVer
+                
+                # Rename the property
+                $scopedName = "@$Owner/$pkgName"
+                $json.frontendDependencies.packages | Add-Member -NotePropertyName $scopedName -NotePropertyValue $verObj -Force
+                $json.frontendDependencies.packages.PSObject.Properties.Remove($pkgName)
+                $modified = $true
+            }
+        }
+
+        if ($modified) {
+            ConvertTo-Json $json -Depth 10 | Format-Json | Set-Content $pkgPath -Encoding UTF8
+            Write-Host "Converted package.json to scoped format (@$Owner/...)" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "Package.json already in scoped format" -ForegroundColor Gray
+            return $false
+        }
+    } catch {
+        Write-Warning "Failed to convert to scoped format: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+$Global:packageJsonBackup = $null    
+function Backup-PackageJson {
+    $packageJsonPath = Join-Path (Get-Location) "package.json"
+    if (Test-Path $packageJsonPath) {
+        $Global:packageJsonBackup = Get-Content $packageJsonPath -Raw
+        Write-Host "Package.json backed up successfully" -ForegroundColor Green
+    }
+}
+
+function Restore-PackageJsonBackup {
+    $packageJsonPath = Join-Path (Get-Location) "package.json"
+    if ($null -ne $Global:packageJsonBackup) {
+        try {
+            Set-Content -Path $packageJsonPath -Value $Global:packageJsonBackup -Encoding UTF8
+            Write-Host "Package.json restored to original format" -ForegroundColor Green
+        } catch {
+            Write-Warning "Failed to restore package.json: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Warning "No backup available to restore package.json"
+    }
+}
+
+function Convert-ToAliasFormat {
+    <#
+    .SYNOPSIS
+    Converts package.json to alias format: "packageName": "npm:@username/packageName@version"
+    This is done AFTER installation for better readability and compatibility
+    #>
+    param([string]$Owner = $GithubUsername.ToLower())
+    
+    $pkgPath = Join-Path (Get-Location) "package.json"
+    if (-not (Test-Path $pkgPath)) {
+        Write-Warning "package.json not found"
+        return $false
+    }
+
+    try {
+        $json = Get-Content $pkgPath -Raw | ConvertFrom-Json
+        $modified = $false
+
+        # Process dependencies
+        if ($json.dependencies) {
+            $newDeps = [ordered]@{}
+            foreach ($prop in $json.dependencies.PSObject.Properties) {
+                $pkgName = $prop.Name
+                $ver = $prop.Value
+
+                # Check if it's a scoped package from our registry
+                if ($pkgName -match "^@$Owner/(.+)$") {
+                    $unscopedName = $matches[1]
+                    $aliasValue = "npm:@$Owner/$unscopedName@$ver"
+                    $newDeps[$unscopedName] = $aliasValue
+                    $modified = $true
+                } else {
+                    # Keep as-is if not our scoped package
+                    $newDeps[$pkgName] = $ver
+                }
+            }
+            
+            $json.dependencies = [PSCustomObject]$newDeps
+        }
+
+        # Process devDependencies
+        if ($json.devDependencies) {
+            $newDevDeps = [ordered]@{}
+            foreach ($prop in $json.devDependencies.PSObject.Properties) {
+                $pkgName = $prop.Name
+                $ver = $prop.Value
+
+                if ($pkgName -match "^@$Owner/(.+)$") {
+                    $unscopedName = $matches[1]
+                    $aliasValue = "npm:@$Owner/$unscopedName@$ver"
+                    $newDevDeps[$unscopedName] = $aliasValue
+                    $modified = $true
+                } else {
+                    $newDevDeps[$pkgName] = $ver
+                }
+            }
+            
+            $json.devDependencies = [PSCustomObject]$newDevDeps
+        }
+
+        # Process frontendDependencies
+        if ($json.frontendDependencies -and $json.frontendDependencies.packages) {
+            $newFrontendPkgs = [ordered]@{}
+            foreach ($prop in $json.frontendDependencies.packages.PSObject.Properties) {
+                $pkgName = $prop.Name
+                $verObj = $json.frontendDependencies.packages.$pkgName
+
+                if ($pkgName -match "^@$Owner/(.+)$") {
+                    $unscopedName = $matches[1]
+                    $currentVer = $verObj.version
+                    $aliasValue = "npm:@$Owner/$unscopedName@$currentVer"
+                    
+                    # Create new version object
+                    $newVerObj = [PSCustomObject]@{}
+                    foreach ($verProp in $verObj.PSObject.Properties) {
+                        if ($verProp.Name -eq 'version') {
+                            $newVerObj | Add-Member -NotePropertyName 'version' -NotePropertyValue $aliasValue
                         } else {
-                            Write-Host "  Found $($depArr.Count) subdependencies for $Pkg@$Ver (array)" -ForegroundColor Yellow
-                            foreach ($dep in $depArr) {
-                                if ($dep.PSObject.Properties["name"] -and $dep.PSObject.Properties["version"]) {
-                                    $depName = $dep.name
-                                    $depVerSpec = $dep.version
-                                    Write-Host "    Recursing into $depName@$depVerSpec (dependency of $Pkg@$Ver)" -ForegroundColor DarkYellow
-                                    $depVer = Get-PackageVersion -PackageName $depName -VersionSpec $depVerSpec
-                                    if (-not (CheckRecursively -Pkg $depName -Ver $depVer)) {
-                                        return $false
-                                    }
+                            $newVerObj | Add-Member -NotePropertyName $verProp.Name -NotePropertyValue $verProp.Value
+                        }
+                    }
+                    
+                    $newFrontendPkgs[$unscopedName] = $newVerObj
+                    $modified = $true
+                } else {
+                    $newFrontendPkgs[$pkgName] = $verObj
+                }
+            }
+            
+            $json.frontendDependencies.packages = [PSCustomObject]$newFrontendPkgs
+        }
+
+        if ($modified) {
+            ConvertTo-Json $json -Depth 10 | Format-Json | Set-Content $pkgPath -Encoding UTF8
+            Write-Host "Converted package.json to alias format (packageName: npm:@$Owner/...)" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "Package.json already in alias format or no conversion needed" -ForegroundColor Gray
+            return $false
+        }
+    } catch {
+        Write-Warning "Failed to convert to alias format: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Convert-PackageSymlinks {
+    <#
+    .SYNOPSIS
+    Creates junction points for all installed scoped packages to their unscoped names.
+    Handles both regular packages and scoped packages with delimiter.
+    Examples:
+    - @ve00ym329/axios -> axios
+    - @ve00ym329/colors-p.g-colors -> @colors/colors
+    #>
+    param([string]$Owner = $GithubUsername.ToLower())
+    
+    $nodeModulesPath = Join-Path (Get-Location) "node_modules"
+    if (-not (Test-Path $nodeModulesPath)) {
+        Write-Warning "node_modules folder not found"
+        return $false
+    }
+
+    $scopedPath = Join-Path $nodeModulesPath "@$Owner"
+    if (-not (Test-Path $scopedPath)) {
+        Write-Host "No @$Owner scoped packages found in node_modules" -ForegroundColor Gray
+        return $false
+    }
+
+    try {
+        $junctionCount = 0
+        $skippedCount = 0
+        $failedCount = 0
+
+        # Get all packages in the scoped folder
+        Get-ChildItem -Path $scopedPath -Directory | ForEach-Object {
+            $scopedPackageName = $_.Name
+            $scopedPackagePath = $_.FullName
+            
+            # Check if this is a package with the delimiter (originally a scoped package)
+            if ($scopedPackageName -match "^(.+)$Global:delimiter(.+)$") {
+                $originalScope = $matches[1]
+                $originalPackageName = $matches[2]
+                
+                Write-Host "Processing scoped package: $originalScope/$originalPackageName" -ForegroundColor Cyan
+                
+                # Create the scope directory if it doesn't exist
+                $targetScopePath = Join-Path $nodeModulesPath "@$originalScope"
+                if (-not (Test-Path $targetScopePath)) {
+                    try {
+                        New-Item -ItemType Directory -Path $targetScopePath -Force -ErrorAction Stop | Out-Null
+                        Write-Host "  Created scope directory: @$originalScope" -ForegroundColor Green
+                    } catch {
+                        Write-Warning "  Failed to create scope directory @$originalScope : $($_.Exception.Message)"
+                        $failedCount++
+                        return
+                    }
+                }
+                
+                # Create junction: @originalScope/originalPackageName -> @owner/scope-p.g-package
+                $targetJunctionPath = Join-Path $targetScopePath $originalPackageName
+                
+                # Check if target already exists
+                if (Test-Path $targetJunctionPath) {
+                    $item = Get-Item $targetJunctionPath -Force
+                    if ($item.LinkType -eq "Junction" -and $item.Target -eq $scopedPackagePath) {
+                        Write-Host "  Junction already exists and is correct: @$originalScope/$originalPackageName" -ForegroundColor Gray
+                        $skippedCount++
+                        return
+                    } elseif ($item.LinkType -eq "Junction") {
+                        # Remove old junction and create new one
+                        try {
+                            Remove-Item $targetJunctionPath -Force -ErrorAction Stop
+                            New-Item -ItemType Junction -Path $targetJunctionPath -Target $scopedPackagePath -Force -ErrorAction Stop | Out-Null
+                            Write-Host "  Updated junction: @$originalScope/$originalPackageName -> @$Owner/$scopedPackageName" -ForegroundColor Green
+                            $junctionCount++
+                        } catch {
+                            Write-Warning "  Failed to update junction: @$originalScope/$originalPackageName - $($_.Exception.Message)"
+                            $failedCount++
+                        }
+                    } else {
+                        Write-Warning "  Path exists but is not a junction: @$originalScope/$originalPackageName"
+                        $skippedCount++
+                    }
+                } else {
+                    # Create new junction
+                    try {
+                        New-Item -ItemType Junction -Path $targetJunctionPath -Target $scopedPackagePath -Force -ErrorAction Stop | Out-Null
+                        Write-Host "  Created junction: @$originalScope/$originalPackageName -> @$Owner/$scopedPackageName" -ForegroundColor Green
+                        $junctionCount++
+                    } catch {
+                        Write-Warning "  Failed to create junction: @$originalScope/$originalPackageName - $($_.Exception.Message)"
+                        $failedCount++
+                    }
+                }
+            } else {
+                # Regular unscoped package
+                $unscopedJunctionPath = Join-Path $nodeModulesPath $scopedPackageName
+
+                # Check if unscoped name already exists
+                if (Test-Path $unscopedJunctionPath) {
+                    $item = Get-Item $unscopedJunctionPath -Force
+                    if ($item.LinkType -eq "Junction" -and $item.Target -eq $scopedPackagePath) {
+                        $skippedCount++
+                    } elseif ($item.LinkType -eq "Junction") {
+                        # Remove old junction and create new one
+                        try {
+                            Remove-Item $unscopedJunctionPath -Force -ErrorAction Stop
+                            New-Item -ItemType Junction -Path $unscopedJunctionPath -Target $scopedPackagePath -Force -ErrorAction Stop | Out-Null
+                            $junctionCount++
+                        } catch {
+                            Write-Warning "  Failed to update junction: $scopedPackageName - $($_.Exception.Message)"
+                            $failedCount++
+                        }
+                    } else {
+                        $skippedCount++
+                    }
+                } else {
+                    # Create the junction point
+                    try {
+                        New-Item -ItemType Junction -Path $unscopedJunctionPath -Target $scopedPackagePath -Force -ErrorAction Stop | Out-Null
+                        $junctionCount++
+                    } catch {
+                        Write-Warning "  Failed to create junction: $scopedPackageName - $($_.Exception.Message)"
+                        $failedCount++
+                    }
+                }
+            }
+        }
+
+        Write-Host "`n=== SYMLINK CREATION SUMMARY ===" -ForegroundColor Magenta
+        if ($junctionCount -gt 0) {
+            Write-Host "Created/Updated: $junctionCount junction(s)" -ForegroundColor Green
+        }
+        if ($skippedCount -gt 0) {
+            Write-Host "Skipped: $skippedCount package(s) (already correct)" -ForegroundColor Gray
+        }
+        if ($failedCount -gt 0) {
+            Write-Host "Failed: $failedCount package(s)" -ForegroundColor Red
+        }
+        
+        Copy-FrontendDependencies | Out-Null
+        return $junctionCount -gt 0
+    } catch {
+        Write-Warning "Failed to create junctions: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Copy-FrontendDependencies {
+    <#
+    .SYNOPSIS
+    Copies frontend dependency files from node_modules to target directories
+    Mimics the functionality of the frontend-dependencies npm package
+    #>
+    
+    $packageJsonPath = Join-Path (Get-Location) "package.json"
+    if (-not (Test-Path $packageJsonPath)) {
+        Write-Warning "package.json not found"
+        return $false
+    }
+
+    try {
+        $packageJson = Get-Content $packageJsonPath -Raw | ConvertFrom-Json
+        
+        if (-not $packageJson.frontendDependencies) {
+            Write-Host "No frontendDependencies in package.json" -ForegroundColor Gray
+            return $false
+        }
+
+        if (-not $packageJson.frontendDependencies.packages) {
+            Write-Warning "No frontendDependencies.packages in package.json"
+            return $false
+        }
+
+        $defaultTarget = $packageJson.frontendDependencies.target
+        if (-not $defaultTarget) {
+            Write-Warning "No default 'frontendDependencies.target' in package.json"
+            return $false
+        }
+
+        $nodeModulesPath = Join-Path (Get-Location) "node_modules"
+        $copiedCount = 0
+        $failedCount = 0
+
+        Write-Host "`n=== COPYING FRONTEND DEPENDENCIES TO TARGET PATHS ===" -ForegroundColor Magenta
+
+        foreach ($prop in $packageJson.frontendDependencies.packages.PSObject.Properties) {
+            $pkgName = $prop.Name
+            $pkgConfig = $prop.Value
+
+            # Determine source path in node_modules
+            $scopedPath = Join-Path $nodeModulesPath "@$($GithubUsername.ToLower())/$pkgName" 
+            $unscopedPath = Join-Path $nodeModulesPath $pkgName
+            
+            $modulePath = $null
+            if (Test-Path $scopedPath) {
+                $modulePath = $scopedPath
+            } elseif (Test-Path $unscopedPath) {
+                $modulePath = $unscopedPath
+            } else {
+                Write-Warning "  Module not found in node_modules: $pkgName"
+                $failedCount++
+                continue
+            }
+
+            # Determine source files/folder within the module
+            $srcPattern = $pkgConfig.src
+            if ($srcPattern) {
+                $sourceFilesPath = Join-Path $modulePath $srcPattern
+            } else {
+                # Copy entire package (all files)
+                $sourceFilesPath = Join-Path $modulePath "*"
+            }
+
+            # Determine target path
+            $targetPath = $pkgConfig.target
+            if (-not $targetPath) {
+                $targetPath = $defaultTarget
+            }
+            $targetPath = Join-Path (Get-Location) $targetPath
+
+            # Check namespaced option
+            $namespaced = $pkgConfig.namespaced
+            if ($null -eq $namespaced -and -not $srcPattern) {
+                # Default to namespaced if src not defined (to prevent namespace errors)
+                $namespaced = $true
+            }
+
+            if ($namespaced) {
+                $unscopedPackageName = $pkgName -replace "@$($GithubUsername.ToLower())/", ""
+                $targetPath = Join-Path $targetPath $unscopedPackageName
+            }
+
+            # Create target directory
+            if (-not (Test-Path $targetPath)) {
+                New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+            }
+
+            # Copy files
+            try {
+                # Check if source path has wildcards or is a specific file/folder
+                if ($srcPattern -and ($srcPattern -match '\*' -or $srcPattern -match '\{.*\}')) {
+                    # Handle glob patterns like "dist/*" or "dist/{file1,file2}"
+                    # PowerShell doesn't support brace expansion like bash, so we'll use wildcards
+                    $sourceFiles = Get-ChildItem -Path $sourceFilesPath -Recurse -ErrorAction SilentlyContinue
+                    
+                    if ($sourceFiles) {
+                        Copy-Item -Path $sourceFilesPath -Destination $targetPath -Recurse -Force -ErrorAction Stop
+                        $copiedCount++
+                    } else {
+                        Write-Warning "  No files found matching pattern: $srcPattern"
+                        $failedCount++
+                    }
+                } else {
+                    # Copy entire directory or specific files
+                    if (Test-Path $sourceFilesPath) {
+                        Copy-Item -Path $sourceFilesPath -Destination $targetPath -Recurse -Force -ErrorAction Stop
+                        $copiedCount++
+                    } else {
+                        Write-Warning "  Source path not found: $sourceFilesPath"
+                        $failedCount++
+                    }
+                }
+            } catch {
+                Write-Warning "  Failed to copy files: $($_.Exception.Message)"
+                $failedCount++
+            }
+        }
+
+        if ($copiedCount -gt 0) {
+            Write-Host "Successfully copied: $copiedCount package(s)" -ForegroundColor Green
+        }
+        if ($failedCount -gt 0) {
+            Write-Host "Failed: $failedCount package(s)" -ForegroundColor Red
+        }
+
+        return $copiedCount -gt 0
+    } catch {
+        Write-Warning "Failed to process frontend dependencies: $($_.Exception.Message)"
+        return $false
+    }
+}
+   
+
+#endregion
+
+#region Version Resolution
+
+function Get-PackageVersion {
+    param(
+        [string]$PackageName,
+        [string]$VersionSpec = "latest"
+    )
+
+    $cacheKey = "$PackageName@$VersionSpec"
+    if ($Global:VersionCache.ContainsKey($cacheKey)) {
+        return $Global:VersionCache[$cacheKey]
+    }
+
+    try {
+        $versionOutput = npm view "$PackageName@$VersionSpec" version `
+            --registry=https://registry.npmjs.org/ 2>$null |
+            Select-Object -Last 1 |
+            ForEach-Object { if ($_ -match '\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?') { $matches[0] } }
+
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($versionOutput)) {
+            $resolved = $versionOutput.Trim().Trim("'").Trim('"')
+            $Global:VersionCache[$cacheKey] = $resolved
+            return $resolved
+        }
+
+        if ($VersionSpec -match '^[><=]+') {
+            $allVersionsRaw = npm view $PackageName versions --json --registry=https://registry.npmjs.org/ 2>$null
+            if ($allVersionsRaw) {
+                $allVersions = $allVersionsRaw | ConvertFrom-Json
+                if ($allVersions -is [Array] -and $allVersions.Count -gt 0) {
+                    $resolved = $allVersions[-1]
+                    $Global:VersionCache[$cacheKey] = $resolved
+                    return $resolved
+                }
+            }
+        }
+
+        Write-Host "Could not resolve '$VersionSpec' for '$PackageName'" -ForegroundColor Yellow
+        return $VersionSpec
+    } catch {
+        Write-Host "Error resolving $PackageName : $($_.Exception.Message)" -ForegroundColor Red
+        return $VersionSpec
+    }
+}
+
+#endregion
+
+#region Workflow Management
+
+function Wait-For-Workflow {
+    param(
+        [string]$PackageName,
+        [string]$Version
+    )
+
+    Write-Host "  Waiting for workflow to complete..." -ForegroundColor Gray
+    
+    Start-Sleep -Seconds 5
+    
+    try {
+        $runsUrl = "https://api.github.com/repos/$GithubUsername/$GithubRepo/actions/workflows/publish-to-ghp.yml/runs?per_page=5"
+        $workflowRuns = Invoke-RestMethod -Uri $runsUrl -Headers $headers
+        $latestRun = $workflowRuns.workflow_runs | 
+            Where-Object { $_.created_at -gt (Get-Date).AddMinutes(-5).ToUniversalTime().ToString("o") } |
+            Sort-Object -Property created_at -Descending | 
+            Select-Object -First 1
+
+        if (-not $latestRun) {
+            Write-Warning "Could not find workflow run"
+            return $false
+        }
+        
+        $runId = $latestRun.id
+        $status = $latestRun.status
+        $timeout = (Get-Date).AddMinutes(10)  # Longer timeout since processing all deps
+
+        Write-Host "  Monitoring workflow run #$runId" -ForegroundColor Gray
+
+        while ($status -ne "completed" -and (Get-Date) -lt $timeout) {
+            Start-Sleep -Seconds 10
+            
+            $runUrl = "https://api.github.com/repos/$GithubUsername/$GithubRepo/actions/runs/$runId"
+            $runDetails = Invoke-RestMethod -Uri $runUrl -Headers $headers
+            $status = $runDetails.status
+            
+            Write-Host "  Status: $status" -ForegroundColor Gray
+        }
+
+        if ($status -ne "completed") {
+            Write-Warning "Workflow timed out after 10 minutes"
+            return $false
+        }
+
+        $conclusion = $runDetails.conclusion
+        if ($conclusion -eq 'success') {
+            Write-Host "Workflow completed successfully" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Warning "Workflow completed with status: $conclusion"
+            return $false
+        }
+    } catch {
+        Write-Warning "Error monitoring workflow: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Invoke-PackagePublishWorkflow {
+    param(
+        [string]$PackageName,
+        [string]$Version
+    )
+
+    Write-Host "Processing Package: [$PackageName@$Version]" -ForegroundColor Cyan
+
+    $cacheCheckOutput = npm view "$PackageName@$Version" version --registry=https://npm.pkg.github.com 2>&1
+    $unscopedPackageName = $PackageName -replace "^@?$GithubUsername[/\-]", ""
+    # If not found in GitHub registry, perform checks
+    if ($LASTEXITCODE -ne 0 -or $cacheCheckOutput -notmatch '\d+\.\d+') { 
+        # Fetch metadata (single call)
+        $metaPackageData = npm view "$unscopedPackageName@$Version" --json | ConvertFrom-Json
+        # Check for errors
+        if ($LASTEXITCODE -ne 0 -or $metaPackageData -match "ERR!") {
+            Write-Warning "Failed to fetch metadata for $unscopedPackageName@$Version, Output: $metaPackageData"
+            continue
+        }
+
+        # Extract individual fields
+        $extractedLicense = $metaPackageData.license
+        $extractedNodeEngine = $metaPackageData.engines.node
+        $deprecationStatus = $metaPackageData.deprecated   
+        # Check deprecation status
+        if (-not [string]::IsNullOrEmpty($deprecationStatus)) {
+            Write-Warning "This package version is deprecated: $deprecationStatus"
+            Write-Host "Consider using a different version." -ForegroundColor Yellow
+            Write-VersionSuggestions -PackageName $unscopedPackageName -ProblemVersion $Version
+        }
+
+        # Dependency license check function
+        function Test-DependencyLicenses {
+            param(
+                [string]$RootPackage,
+                [string]$RootVersion
+            )
+            $checked = @{}
+            
+            function CheckRecursively {
+                param (
+                    [string]$Pkg,
+                    [string]$Ver
+                )
+                $key = "$Pkg@$Ver"
+                if ($checked.ContainsKey($key)) { return $true }
+                $checked[$key] = $true
+                
+                # Skip if version has unresolved specifiers
+                if ($Ver -match '[<>=~^]') {
+                    Write-Host "  Skipping license check for $Pkg@$Ver (unresolved version)" -ForegroundColor DarkGray
+                    return $true
+                }
+                
+                Write-Host "  Checking license for $Pkg@$Ver" -ForegroundColor DarkCyan
+                
+                $depLicense = npm view "$Pkg@$Ver" license --registry=https://registry.npmjs.org/ 2>$null
+                if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($depLicense)) {
+                    Write-Host "    Could not retrieve license, skipping" -ForegroundColor DarkGray
+                    return $true
+                }
+                
+                Write-Host "    License: $depLicense" -ForegroundColor DarkCyan
+                if (-not (Test-LicenseExpression -Expression $depLicense)) {
+                    Write-Error "LICENSE VIOLATION: Dependency $Pkg@$Ver has unapproved license '$depLicense'"
+                    return $false
+                }
+                
+                # Check dependencies of this package
+                $depsJson = npm view "$Pkg@$Ver" dependencies --json --registry=https://registry.npmjs.org/ 2>$null
+                if (-not [string]::IsNullOrEmpty($depsJson) -and $depsJson -ne 'undefined') {
+                    try {
+                        $depObj = $depsJson | ConvertFrom-Json
+                        if ($depObj.PSObject.Properties.Count -gt 0) {
+                            foreach ($depName in $depObj.PSObject.Properties.Name) {
+                                $depVerSpec = $depObj.$depName
+                                
+                                # Try to resolve the dependency version
+                                $resolvedDepVer = Get-PackageVersion -PackageName $depName -VersionSpec $depVerSpec
+                                
+                                # Skip if we couldn't resolve it properly
+                                if ($resolvedDepVer -eq $depVerSpec -and $depVerSpec -match '[<>=~^]') {
+                                    Write-Host "    Skipping $depName@$depVerSpec (complex range)" -ForegroundColor DarkGray
+                                    continue
+                                }
+                                
+                                if (-not (CheckRecursively -Pkg $depName -Ver $resolvedDepVer)) {
+                                    return $false
                                 }
                             }
                         }
-                    } else {
-                        Write-Host "  Unrecognized dependency object type for $Pkg@$Ver" -ForegroundColor Red
+                    } catch {
+                        Write-Host "    Failed to parse dependencies: $($_.Exception.Message)" -ForegroundColor DarkGray
                     }
-                } catch {
-                    Write-Host "  Failed to parse dependencies for $Pkg@$Ver : $($_.Exception.Message)" -ForegroundColor Red
                 }
-            } else {
-                Write-Host "  No subdependencies for $Pkg@$Ver (empty or undefined)" -ForegroundColor Gray
+                return $true
             }
-            return $true
+            
+            $result = CheckRecursively -Pkg $RootPackage -Ver $RootVersion
+            Write-Host "Finished license check for $RootPackage@$RootVersion" -ForegroundColor Gray
+            return $result
         }
-        Write-Host "Starting license check for $RootPackage@$RootVersion ..." -ForegroundColor Yellow
-        $result = CheckRecursively -Pkg $RootPackage -Ver $RootVersion
-        Write-Host "Finished license check for $RootPackage@$RootVersion" -ForegroundColor Yellow
-        return $result
-    }
 
-    Write-Host "[LICENSE] Checking all dependencies for $PackageName@$ConcreteVersion ..." -ForegroundColor Magenta
-    if (-not (Check-DependencyLicenses -RootPackage $PackageName -RootVersion $ConcreteVersion)) {
-        Write-Error "LICENSE VIOLATION: One or more dependencies of $PackageName@$ConcreteVersion have unapproved licenses. Halting installation."
-        return $false
-    }
-    Write-Host "[LICENSE] All licenses for $PackageName@$ConcreteVersion and its dependencies are approved." -ForegroundColor Green
+        # LICENSE CHECK - only if not cached
+        Write-Host "[LICENSE] Top-level license for $unscopedPackageName@$Version : $extractedLicense" -ForegroundColor Cyan
 
-    # Check Node.js compatibility before proceeding
-    $isCompatible = Check-NodeCompatibility -PackageName $PackageName -PackageVersion $ConcreteVersion
-    if (-not $isCompatible) {
-        Write-Host "Proceeding despite compatibility warning..." -ForegroundColor Yellow
-    }
-
-    if ($PackageName.StartsWith("@")) {
-        Write-Host "Skipping caching of third-party scoped package (rule: skip scoped): $($PackageName)" -ForegroundColor DarkGray
-        return $true
-    }
-
-    $ScopedPackageNameWithVersion = "@$($GithubUsername)/$($PackageName)"
-    Write-Host "Checking for exact package '$($ScopedPackageNameWithVersion)/$($ConcreteVersion)' in your GitHub Packages cache..."
+        if (-not (Test-LicenseExpression -Expression $extractedLicense)) {
+            Write-Error "LICENSE VIOLATION: The license '$extractedLicense' for $unscopedPackageName@$Version is not approved. Halting."
+            return $result
+        }
     
-    # Step 2: Perform a reliable check for that *exact* concrete version in your private cache.
-    # This command will only succeed if the specific version exists.
-    # npm view $ScopedPackageNameWithVersion versions --silent > $null 2>&1
-
-    # Run the command and check the result
-    $versionExists = (npm view $ScopedPackageNameWithVersion versions --silent) | Select-String -Pattern $ConcreteVersion -Quiet
-
-    if ($versionExists) {
-        # The package and exact version exist in the cache. We can install it.
-        Write-Host "Package found in GitHub Packages cache." -ForegroundColor Green
-
-        # Check if the package still exists publicly
-        npm view "$($PackageName)@$($ConcreteVersion)" version --registry=https://registry.npmjs.org/ > $null 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "The original package '$($PackageName)@$($ConcreteVersion)' no longer exists on the public NPM registry. You are installing from your private cache." -ForegroundColor Red
+        Write-Host "[LICENSE] Checking all dependencies for $unscopedPackageName@$Version..." -ForegroundColor Magenta
+        if (-not (Test-DependencyLicenses -RootPackage $unscopedPackageName -RootVersion $Version)) {
+            Write-Error "LICENSE VIOLATION: One or more dependencies of $unscopedPackageName@$Version have unapproved licenses."
+            return $result
         }
-        $result = $true
-        return $result
+        Write-Host "[LICENSE] All licenses approved!" -ForegroundColor Green
+        
+        NODE COMPATIBILITY CHECK
+        $isCompatible = Test-NodeCompatibility -unscopedPackageName $unscopedPackageName -PackageVersion $Version -NodeEngine $extractedNodeEngine
+        if (-not $isCompatible) {
+            Write-Host "Proceeding despite compatibility warning..." -ForegroundColor Yellow
+        }    
+    } else {
+        Write-Host "Package $unscopedPackageName@$Version already published in GitHub registry cache. Skipping license and compatibility checks." -ForegroundColor Green
     }
-
-    # Step 3: If the check failed, the package is not in the cache. Trigger the workflow.
-    Write-Host "Package not found. Triggering caching workflow for '$($PackageName)@$($VersionSpec)'..." -ForegroundColor Yellow
+    # Trigger GitHub Workflow
+    Write-Host "Triggering workflow for $unscopedPackageName@$Version (with all dependencies)" -ForegroundColor Cyan
+    Write-Host "This will automatically process all transitive dependencies." -ForegroundColor Yellow
+    
     try {
         $body = @{
-            ref = "main" # Or your default branch
+            ref = "main"
             inputs = @{
-                package_name = $PackageName
-                # Trigger the workflow with the original version specifier
-                package_version = $VersionSpec
+                package_name = $unscopedPackageName
+                package_version = $Version
             }
         } | ConvertTo-Json
 
-        Invoke-RestMethod -Uri $GithubApiUrl -Method POST -Headers $headers -Body $body -ContentType "application/json"
-        
-        # Instead of a simple sleep, we now wait for the workflow to finish
-        $workflowSucceeded = Wait-For-Workflow -WorkflowFileName "publish-to-ghp.yml" -PackageName $PackageName
-        
-        if ($workflowSucceeded) {
-            Write-Host "Package should now be cached. The script will attempt to use it." -ForegroundColor Green
-            $result = $true
-        } else {
-            Write-Host "Workflow failed or timed out. Please check the Actions tab in your GitHub repository." -ForegroundColor Red
-            $result = $false
-        }
+        Invoke-RestMethod -Uri $GithubApiUrl -Method POST -Headers $headers -Body $body -ContentType "application/json" | Out-Null
+        $workflowSucceeded = Wait-For-Workflow -PackageName $PackageName -Version $Version
+        return $workflowSucceeded
+    } catch {
+        Write-Host "  Error triggering workflow: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
     }
-    catch {
-        Write-Host "Error starting GitHub workflow for $($PackageName)" -ForegroundColor Red
-        Write-Host "Check your PAT permissions and repository configuration." -ForegroundColor Red
-        Write-Host "Error details: $($_.Exception.Message)" -ForegroundColor Red
-        $result = $false
-    }
-    
-    # Optionally recurse into transitive dependencies for caching
-    if ($Recurse -and $result) {
-        try {
-            $depsJson = npm view "$PackageName@$ConcreteVersion" dependencies --json --registry=https://registry.npmjs.org/ 2>$null
-            if (-not [string]::IsNullOrEmpty($depsJson) -and $depsJson -ne 'undefined') {
-                $depObj = $null
-                try { $depObj = $depsJson | ConvertFrom-Json } catch { $depObj = $null }
-                if ($depObj -ne $null) {
-                    Write-Host " Recursing into transitive dependencies of $PackageName@$ConcreteVersion (count: $($depObj.Keys.Count))" -ForegroundColor DarkCyan
-                    foreach ($depName in $depObj.Keys) {
-                        $depSpec = $depObj[$depName]
-                        # Avoid runaway recursion for large graphs; still leverage hash guard
-                        Process-Package -PackageName $depName -VersionSpec $depSpec -Recurse -NoLicenseRecursion | Out-Null
-                    }
-                }
-            }
-        } catch {
-            Write-Host "Warning: Failed to enumerate transitive dependencies for $PackageName@$ConcreteVersion : $($_.Exception.Message)" -ForegroundColor Yellow
-        }
-    }
-
-    return $result
 }
 
-function Uninstall-Package {
-    param(
-        [string]$PackageName
-    )
+#endregion
 
-    Write-Host "`n--- Uninstalling package: $PackageName ---" -ForegroundColor Cyan
+#region Package Installation
+
+function Install-FromGitHubRegistry {
+    param(
+        [string]$PackageName,
+        [string]$Version,
+        [boolean] $IsPackageJsonUpdateRequired = $true
+    )
+    $PublishedName = Get-PublishedName -origName $PackageName -owner $GithubUsername.ToLower()    
+    try {
+        $installCmd = "npm install `"$PublishedName@$Version`" --registry=https://npm.pkg.github.com --prefer-offline --no-audit --silent"
+        Write-Host "Installing $PublishedName@$Version from GitHub registry..." -ForegroundColor Cyan        
+        try {
+            $output = & cmd /c $installCmd 2>&1
+            $exitCode = $LASTEXITCODE
+
+            if ($exitCode -eq 0) {
+                Write-Host " Installed successfully" -ForegroundColor Green
+                if ($IsPackageJsonUpdateRequired) {
+                    Update-PackageJsonDependencyInCorrectSection -PackageName $PackageName -Version $Version
+                }
+                return $true
+            }
+            elseif ($output -match 'up to date' -or $output -match 'already satisfied' -or $output -match 'Nothing to install' -or $output -match 'added 0 packages') {
+                Write-Host " Package already installed and up to date" -ForegroundColor Yellow
+                return $true
+            }
+            else {
+                Write-Warning " Installation failed with code $exitCode"
+                Write-Host " Installation Failure Output: $output"
+                return $false
+            }
+        }
+        catch {
+            Write-Warning " Installation failed with exception: $($_.Exception.Message)"
+            return $false
+        }
+
+    } catch {
+        Write-Host "  Exception: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+#endregion
+
+#region Uninstall Functions
+
+function Uninstall-Package {
+    param([string]$PackageName)
+
+    Write-Host "Uninstalling: $PackageName" -ForegroundColor Cyan
 
     $uninstalled = $false
     $nodeModulesPath = Join-Path (Get-Location) 'node_modules'
     
-    # Try to uninstall scoped version first
-    $scopedName = "@$GithubUsername/$PackageName"
-    $scopedPath = Join-Path $nodeModulesPath "@$GithubUsername"
-    $scopedPackagePath = Join-Path $scopedPath $PackageName
-    
-    if (Test-Path $scopedPackagePath) {
-        try {
-            Write-Host "Removing scoped package: $scopedName" -ForegroundColor Yellow
-            npm uninstall $scopedName --no-save 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "Successfully removed scoped package: $scopedName" -ForegroundColor Green
-            } else {
-                # Manual removal if npm uninstall fails
-                Remove-Item $scopedPackagePath -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Host "Manually removed scoped package directory: $scopedPackagePath" -ForegroundColor Green
+    if ($PackageName.StartsWith("@")) {
+        $packagePath = Join-Path $nodeModulesPath $PackageName
+        
+        if (Test-Path $packagePath) {
+            try {
+                npm uninstall $PackageName --no-save 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  Removed successfully" -ForegroundColor Green
+                } else {
+                    Remove-Item $packagePath -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Host "  Manually removed" -ForegroundColor Green
+                }
+                $uninstalled = $true
+            } catch {
+                Write-Warning "Failed to remove: $($_.Exception.Message)"
             }
-            $uninstalled = $true
-        } catch {
-            Write-Warning "Failed to remove scoped package: $($_.Exception.Message)"
+        }
+    } else {
+        $scopedName = "@$GithubUsername/$PackageName"
+        $scopedPath = Join-Path $nodeModulesPath "@$GithubUsername"
+        $scopedPackagePath = Join-Path $scopedPath $PackageName
+        
+        if (Test-Path $scopedPackagePath) {
+            try {
+                npm uninstall $scopedName --no-save 2>$null
+                if ($LASTEXITCODE -ne 0) {
+                    Remove-Item $scopedPackagePath -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                Write-Host "  Removed scoped package" -ForegroundColor Green
+                $uninstalled = $true
+            } catch {}
+        }
+        
+        $unscopedPath = Join-Path $nodeModulesPath $PackageName
+        if (Test-Path $unscopedPath) {
+            try {
+                npm uninstall $PackageName --no-save 2>$null
+                if ($LASTEXITCODE -ne 0) {
+                    Remove-Item $unscopedPath -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                Write-Host "  Removed unscoped package" -ForegroundColor Green
+                $uninstalled = $true
+            } catch {}
         }
     }
     
-    # Try to uninstall unscoped version
-    $unscopedPath = Join-Path $nodeModulesPath $PackageName
-    if (Test-Path $unscopedPath) {
-        try {
-            Write-Host "Removing unscoped package: $PackageName" -ForegroundColor Yellow
-            npm uninstall $PackageName --no-save 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "Successfully removed unscoped package: $PackageName" -ForegroundColor Green
-            } else {
-                # Manual removal if npm uninstall fails
-                Remove-Item $unscopedPath -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Host "Manually removed unscoped package directory: $unscopedPath" -ForegroundColor Green
-            }
-            $uninstalled = $true
-        } catch {
-            Write-Warning "Failed to remove unscoped package: $($_.Exception.Message)"
-        }
-    }
-    
-    # Remove unscoped alias if it exists
-    Remove-UnscopedAlias -PackageName $PackageName
-    
-    # Remove from package.json
     Remove-PackageJsonDependency -PackageName $PackageName
     
     if (-not $uninstalled) {
-        Write-Host "Package $PackageName was not found in node_modules" -ForegroundColor Yellow
+        Write-Host "  Package not found" -ForegroundColor Yellow
     }
     
     return $uninstalled
 }
 
-function Format-Json {
-    [CmdletBinding(DefaultParameterSetName = 'Prettify')]
-    Param(
-        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
-        [string]$Json,
+#endregion
 
-        [Parameter(ParameterSetName = 'Minify')]
-        [switch]$Minify,
+#region Main Script Logic
 
-        [Parameter(ParameterSetName = 'Prettify')]
-        [ValidateRange(1, 1024)]
-        [int]$Indentation = 2,
-
-        [Parameter(ParameterSetName = 'Prettify')]
-        [switch]$AsArray
-    )
-    if ($PSCmdlet.ParameterSetName -eq 'Minify') {
-        return ($Json | ConvertFrom-Json) | ConvertTo-Json -Depth 100 -Compress
-    }
-    if ($Json -notmatch '\r?\n') {
-        $Json = ($Json | ConvertFrom-Json) | ConvertTo-Json -Depth 100
-    }
-    $indent = 0
-    $regexUnlessQuoted = '(?=([^"]*"[^"]*")*[^"]*$)'
-    $result = ($Json -split '\r?\n' | ForEach-Object {
-        if (($_ -match "[}\]]$regexUnlessQuoted") -and ($_ -notmatch "[\{\[]$regexUnlessQuoted")) {
-            $indent = [Math]::Max($indent - $Indentation, 0)
-        }
-        # Replace all colon-space combinations by ": " unless it is inside quotes.
-        $line = (' ' * $indent) + ($_.TrimStart() -replace ":\s+$regexUnlessQuoted", ': ')
-        if (($_ -match "[\{\[]$regexUnlessQuoted") -and ($_ -notmatch "[}\]]$regexUnlessQuoted")) {
-            $indent += $Indentation
-        }
-        $line -replace '\\u0027', "'"
-    # join the array with newlines and convert multiline empty [] or {} into inline arrays or objects
-    }) -join [Environment]::NewLine -replace '(\[)\s+(\])', '$1$2' -replace '(\{)\s+(\})', '$1$2'
-
-    if ($AsArray) { return ,[string[]]($result -split '\r?\n') }
-    $result
-}
-
-
-# --- SCRIPT LOGIC ---
-
-# Check for help flag first
 if ($Help) {
     Show-Help
     exit 0
 }
 
-Write-Host "GitHub Package Cache Manager" -ForegroundColor Magenta
-Write-Host "Repository: $GithubUsername/$GithubRepo" -ForegroundColor Gray
-
-# Mode 1: Uninstall specific packages
+# Mode 1: Uninstall
 if ($Uninstall -and $args.Count -gt 0) {
-    Write-Host "`nRunning in UNINSTALL mode..." -ForegroundColor Magenta
+    Write-Host "=== UNINSTALL MODE ===" -ForegroundColor Magenta
     
     $uninstalledPackages = @()
-    $failedPackages = @()
     
     foreach ($arg in $args) {
         $packageName = $arg
         
-        # Remove version specifier if present (for uninstall we only need package name)
-        $lastAtIndex = $packageName.LastIndexOf('@')
-        if ($lastAtIndex -gt 0) {
-            $packageName = $packageName.Substring(0, $lastAtIndex)
-        }
-        
-        $success = Uninstall-Package -PackageName $packageName
-        if ($success) {
-            $uninstalledPackages += $packageName
-        } else {
-            $failedPackages += $packageName
-        }
-    }
-    
-    # Summary
-    if ($uninstalledPackages.Count -gt 0) {
-        Write-Host "`nSuccessfully uninstalled: $($uninstalledPackages -join ', ')" -ForegroundColor Green
-    }
-    if ($failedPackages.Count -gt 0) {
-        Write-Host "`nFailed to uninstall: $($failedPackages -join ', ')" -ForegroundColor Red
-    }
-    if ($uninstalledPackages.Count -eq 0 -and $failedPackages.Count -eq 0) {
-        Write-Host "`nNo packages were found to uninstall." -ForegroundColor Yellow
-    }
-}
-# Mode 2: Install specific packages
-elseif ($args.Count -gt 0) {
-    Write-Host "`nRunning in INSTALL mode..." -ForegroundColor Magenta
-    
-    $successfulPackages = @()
-    $pendingPackages = @()
-    
-    # CORRECTED: Loop through arguments and parse them
-    foreach ($arg in $args) {
-        $packageNameFromArg = $arg
-        $versionSpecFromArg = "latest"
-
-        # Check for a version specifier, like 'axios@1.8.0'.
-        $lastAtIndex = $packageNameFromArg.LastIndexOf('@')
-        if ($lastAtIndex -gt 0) {
-            $versionSpecFromArg = $packageNameFromArg.Substring($lastAtIndex + 1)
-            $packageNameFromArg = $packageNameFromArg.Substring(0, $lastAtIndex)
-        }
-
-        # Now, process the package with the correctly parsed name and version
-        $canInstall = Process-Package -PackageName $packageNameFromArg -VersionSpec $versionSpecFromArg -Recurse
-        if ($canInstall) {
-            # Resolve concrete version
-            $installVersion = Get-PackageVersion -PackageName $packageNameFromArg -VersionSpec $versionSpecFromArg
-            $scopedInstall = "@$GithubUsername/$packageNameFromArg@$installVersion"
-            Write-Host "Installing (scoped from GitHub cache) $scopedInstall ..." -ForegroundColor Cyan
-            try {
-                # Install scoped package (registry for this scope is set via .npmrc; don't override global to allow unscoped deps from public registry)
-                npm install $scopedInstall --no-save 2>&1 | Tee-Object -Variable rawOut | Out-Null
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "Downloaded scoped package: $scopedInstall" -ForegroundColor Green
-                    Update-PackageJsonDependency -PackageName $packageNameFromArg -Version $installVersion
-                    Ensure-UnscopedAlias -PackageName $packageNameFromArg
-                    $successfulPackages += "$packageNameFromArg@$installVersion"
-                } else {
-                    if ($rawOut -match 'E404' -or $rawOut -match '404 Not Found') {
-                        Write-Warning "Scoped package not found. Falling back to public unscoped install: $packageNameFromArg@$installVersion"
-                        npm install "$packageNameFromArg@$installVersion" --save-exact
-                        if ($LASTEXITCODE -eq 0) {
-                            Write-Host "Installed unscoped from public registry: $packageNameFromArg@$installVersion" -ForegroundColor Yellow
-                            Update-PackageJsonDependency -PackageName $packageNameFromArg -Version $installVersion
-                            $successfulPackages += "$packageNameFromArg@$installVersion"
-                        } else {
-                            Write-Host "Error installing fallback unscoped package $packageNameFromArg@$installVersion" -ForegroundColor Red
-                            Write-VersionSuggestions -PackageName $packageNameFromArg -ProblemVersion $installVersion
-                        }
-                    } else {
-                        Write-Host "Error installing $scopedInstall" -ForegroundColor Red
-                        Write-VersionSuggestions -PackageName $packageNameFromArg -ProblemVersion $installVersion
-                    }
-                }
-            } catch {
-                Write-Host "Error installing $scopedInstall" -ForegroundColor Red
-                Write-Host $_.Exception.Message
-                Write-VersionSuggestions -PackageName $packageNameFromArg -ProblemVersion $installVersion
+        if ($packageName.StartsWith("@")) {
+            $firstAt = $packageName.IndexOf('@')
+            $lastAtIndex = $packageName.LastIndexOf('@')
+            if ($lastAtIndex -gt $firstAt) {
+                $packageName = $packageName.Substring(0, $lastAtIndex)
             }
         } else {
-            $pendingPackages += "$($packageNameFromArg)@$($versionSpecFromArg)"
+            $lastAtIndex = $packageName.LastIndexOf('@')
+            if ($lastAtIndex -gt 0) {
+                $packageName = $packageName.Substring(0, $lastAtIndex)
+            }
+        }
+        
+        if (Uninstall-Package -PackageName $packageName) {
+            $uninstalledPackages += $packageName
         }
     }
     
-    # Summary
-    if ($successfulPackages.Count -gt 0) {
-        Write-Host "`nSuccessfully installed: $($successfulPackages -join ', ')" -ForegroundColor Green
+    if ($uninstalledPackages.Count -gt 0) {
+        Write-Host "Uninstalled: $($uninstalledPackages -join ', ')" -ForegroundColor Green
+    } else {
+        Write-Host "No packages were uninstalled" -ForegroundColor Yellow
     }
-    if ($pendingPackages.Count -gt 0) {
-        Write-Host "`nPackages being cached: $($pendingPackages -join ', ')" -ForegroundColor Yellow
-        Write-Host "Run the script again in a few minutes to install these packages." -ForegroundColor Yellow
-    }
+    
+    exit 0
 }
-# Mode 3: Process package.json
-else {
-    Write-Host "`nRunning in CACHE-ALL mode for package.json..." -ForegroundColor Magenta
-    $packageJsonPath = Resolve-Path "./package.json"
+
+# Mode 2 & 3: Install specific packages or from package.json
+Write-Host "=== CONVERTING PACKAGE.JSON TO SCOPED FORMAT ===" -ForegroundColor Magenta
+Backup-PackageJson | Out-Null
+Convert-ToScopedFormat | Out-Null
+
+$packagesToInstall = @()
+$frontendPackagesToInstall = @()
+$packagesToPublish = @()
+
+if ($args.Count -gt 0) {
+    # Mode 2: Install specific packages
+    Write-Host "=== INSTALL MODE ===" -ForegroundColor Magenta
+    
+    foreach ($arg in $args) {
+        $packageName = $arg
+        $versionSpec = "latest"
+
+        if ($packageName.StartsWith("@")) {
+            $firstAt = $packageName.IndexOf('@')
+            $lastAtIndex = $packageName.LastIndexOf('@')
+            if ($lastAtIndex -gt $firstAt) {
+                $versionSpec = $packageName.Substring($lastAtIndex + 1)
+                $packageName = $packageName.Substring(0, $lastAtIndex)
+            }
+        } else {
+            $lastAtIndex = $packageName.LastIndexOf('@')
+            if ($lastAtIndex -gt 0) {
+                $versionSpec = $packageName.Substring($lastAtIndex + 1)
+                $packageName = $packageName.Substring(0, $lastAtIndex)
+            }
+        }
+
+        $resolvedVersion = Get-PackageVersion -PackageName $packageName -VersionSpec $versionSpec
+        $packagesToInstall += @{
+            Name = $packageName
+            Version = $resolvedVersion
+        }
+        # Parse the backup
+        $pkgObj = $Global:packageJsonBackup | ConvertFrom-Json
+        # Add the package in dependencies for installation
+        $pkgObj.dependencies | Add-Member -NotePropertyName $packageName -NotePropertyValue $resolvedVersion -Force
+        # Update the backup
+        $Global:packageJsonBackup = ConvertTo-Json $pkgObj -Depth 10 | Format-Json
+    }
+} else {
+    # Mode 3: Process package.json
+    Write-Host "=== PACKAGE.JSON MODE ===" -ForegroundColor Magenta
+    
+    $packageJsonPath = Join-Path (Get-Location) "package.json"
     if (-not (Test-Path $packageJsonPath)) {
-        Write-Host "Error: package.json not found in the current directory." -ForegroundColor Red
+        Write-Host "Error: package.json not found" -ForegroundColor Red
         exit 1
     }
     
     $packageJson = Get-Content $packageJsonPath -Raw | ConvertFrom-Json
-
-    $allDependencies = @{}
-    if ($null -ne $packageJson.dependencies) { 
-        $packageJson.dependencies.psobject.Properties | ForEach-Object { 
-            $allDependencies[$_.Name] = Parse-VersionFromPackageJson $_.Value 
+    
+    if ($packageJson.dependencies) { 
+        $packageJson.dependencies.PSObject.Properties | ForEach-Object { 
+            $version = ($_.Value -split '@')[-1]
+            $packagesToInstall += @{ Name = $_.Name; Version = $version }
         } 
     }
-    if ($null -ne $packageJson.devDependencies) { 
-        $packageJson.devDependencies.psobject.Properties | ForEach-Object { 
-            $allDependencies[$_.Name] = Parse-VersionFromPackageJson $_.Value 
+    
+    if ($packageJson.devDependencies) { 
+        $packageJson.devDependencies.PSObject.Properties | ForEach-Object { 
+            $version = ($_.Value -split '@')[-1]
+            $packagesToInstall += @{ Name = $_.Name; Version = $version }
         } 
     }
-
-    if ($allDependencies.Count -eq 0) {
-        Write-Host "No dependencies found in package.json." -ForegroundColor Green
+    
+    if ($packageJson.frontendDependencies -and $packageJson.frontendDependencies.packages) { 
+        $packageJson.frontendDependencies.packages.PSObject.Properties | ForEach-Object { 
+            $version = ($_.Value.version -split '@')[-1]
+            $packagesToInstall += @{ Name = $_.Name; Version = $version }
+            $frontendPackagesToInstall += @{ Name = $_.Name; Version = $version }
+        } 
+    }
+    
+    if ($packagesToInstall.Count -eq 0) {
+        Write-Host "No dependencies found in package.json" -ForegroundColor Green
         exit 0
-    }
-    
-    Write-Host "Found $($allDependencies.Count) total dependencies. Checking cache status..."
-    
-    $cachedCount = 0
-    $pendingCount = 0
-    $finalResolvedDeps = @{}
-    foreach ($entry in $allDependencies.GetEnumerator()) {
-        $isAvailable = Process-Package -PackageName $entry.Name -VersionSpec $entry.Value -Recurse
-        $resolvedVersion = Get-PackageVersion -PackageName $entry.Name -VersionSpec $entry.Value
-        if ($isAvailable) {
-            $scopedInstall = "@$GithubUsername/$($entry.Name)@$resolvedVersion"
-            try {
-                # Scoped install; .npmrc handles registry routing
-                npm install $scopedInstall --no-save 2>&1 | Tee-Object -Variable rawCacheOut | Out-Null
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "Cached / verified $scopedInstall" -ForegroundColor Green
-                    $finalResolvedDeps[$entry.Name] = $resolvedVersion
-                    Ensure-UnscopedAlias -PackageName $entry.Name
-                    $cachedCount++
-                } else {
-                    if ($rawCacheOut -match 'E404' -or $rawCacheOut -match '404 Not Found') {
-                        Write-Warning "Scoped package not found for $($entry.Name). Falling back to unscoped public install."
-                        npm install "$($entry.Name)@$resolvedVersion" --save-exact --no-save
-                        if ($LASTEXITCODE -eq 0) {
-                            Write-Host "Installed unscoped $($entry.Name)@$resolvedVersion from public registry" -ForegroundColor Yellow
-                            $finalResolvedDeps[$entry.Name] = $resolvedVersion
-                            $cachedCount++
-                        } else {
-                            Write-Host "Error installing fallback unscoped $($entry.Name)@$resolvedVersion" -ForegroundColor Red
-                            Write-VersionSuggestions -PackageName $entry.Name -ProblemVersion $resolvedVersion
-                        }
-                    } else {
-                        Write-Host "Error installing $scopedInstall" -ForegroundColor Red
-                        Write-VersionSuggestions -PackageName $entry.Name -ProblemVersion $resolvedVersion
-                    }
-                }
-            } catch {
-                Write-Host "Error installing $scopedInstall" -ForegroundColor Red
-                Write-VersionSuggestions -PackageName $entry.Name -ProblemVersion $resolvedVersion
-            }
-        } else {
-            $pendingCount++
-        }
-    }
-
-    # Update package.json only once at the end with all resolved versions
-    if ($finalResolvedDeps.Count -gt 0) {
-        $pkgPath = Join-Path (Get-Location) 'package.json'
-        if (Test-Path $pkgPath) {
-            try {
-                $jsonRaw = Get-Content $pkgPath -Raw
-                $pkgObj = $jsonRaw | ConvertFrom-Json
-                if (-not $pkgObj.dependencies) { $pkgObj | Add-Member -NotePropertyName dependencies -NotePropertyValue (@{}) }
-                foreach ($depName in $finalResolvedDeps.Keys) {
-                    $pkgObj.dependencies.PSObject.Properties.Remove($depName) | Out-Null 2>$null
-                    $pkgObj.dependencies | Add-Member -NotePropertyName $depName -NotePropertyValue $finalResolvedDeps[$depName] -Force
-                }
-                ConvertTo-Json $pkgObj -Depth 10 | Format-Json | Set-Content $pkgPath -Encoding UTF8
-                Write-Host "package.json updated with all resolved dependency versions." -ForegroundColor DarkGreen
-            } catch {
-                Write-Warning "Failed to update package.json at end: $($_.Exception.Message)"
-            }
-        }
-    }
-    
-    Write-Host "`nSummary:" -ForegroundColor Magenta
-    Write-Host "Already cached: $cachedCount packages" -ForegroundColor Green
-    Write-Host "Being cached: $pendingCount packages" -ForegroundColor Yellow
-    
-    if ($pendingCount -gt 0) {
-        Write-Host "`nWorkflows have been triggered for missing packages." -ForegroundColor Yellow
-        Write-Host "Monitor progress at: https://github.com/$GithubUsername/$GithubRepo/actions" -ForegroundColor Cyan
-        Write-Host "Run this script again once workflows complete to verify all packages are cached." -ForegroundColor Yellow
-    } else {
-        Write-Host "`nAll dependencies are cached and ready to use!" -ForegroundColor Green
-        try {
-            npm install 2>&1 | Tee-Object -Variable rawInstallOut | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "All dependencies installed successfully from cache." -ForegroundColor Green
-            } else {
-                Write-Host "Error during 'npm install':" -ForegroundColor Red
-                Write-Host $rawInstallOut -ForegroundColor Red
-            }
-        } catch {
-            Write-Host "Exception during 'npm install': $_" -ForegroundColor Red
-        }
     }
 }
 
+Write-Host "Packages to process: $($packagesToInstall.Count)" -ForegroundColor Cyan
+
+Write-Host "=== FAST INSTALL PACKAGES ===" -ForegroundColor Magenta
+Write-Host "Attempting to install all packages from GitHub registry..." -ForegroundColor Cyan
+
+try {
+    # Single npm install command for all packages
+    $installCmd = "npm install --registry=https://npm.pkg.github.com --no-audit 2>&1"
+    $output = & cmd /c $installCmd
+    $exitCode = $LASTEXITCODE
+
+    Write-Host "Output from npm install: $output" -ForegroundColor Gray
+
+    if ($frontendPackagesToInstall.Count -gt 0) {
+        Write-Host "Installing frontend dependencies separately..." -ForegroundColor Cyan
+        $packages = ($frontendPackagesToInstall |
+            ForEach-Object { "$($_.Name)@$($_.Version)" }) -join " "
+
+        # Build final npm command
+        $npmCommand = "npm install $packages --registry=https://npm.pkg.github.com --no-save --no-audit 2>&1"
+        # Run the command
+        Invoke-Expression $npmCommand | Out-Null
+    }
+    else {
+        Write-Host "No frontend dependencies to install"
+    }
+
+
+    if ($exitCode -eq 0) {
+        Write-Host "All packages installed successfully from cache!" -ForegroundColor Green
+        Write-Host "=== CONVERTING PACKAGE.JSON TO ALIAS FORMAT ===" -ForegroundColor Magenta
+        Restore-PackageJsonBackup | Out-Null
+        Convert-PackageSymlinks | Out-Null
+        exit 0
+    } else {
+        Write-Host "Some packages not available in cache, parsing output... $output" -ForegroundColor Yellow
+        
+        # Parse npm error output to identify missing packages
+        # npm typically outputs: "404 Not Found - GET https://npm.pkg.github.com/@owner/package"
+        # or "ERR! 404 '@owner/package@version' is not in this registry"
+        
+        $outputText = $output -join "`n"
+        
+        # Extract package names from 404 errors
+        $notFoundPackages = @()
+        $pattern404 = "404.*?@$($GithubUsername.ToLower())/([^\s@']+)"
+        $matches404 = [regex]::Matches($outputText, $pattern404, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        
+        foreach ($match in $matches404) {
+            $pkgName = $match.Groups[1].Value
+            $notFoundPackages += $pkgName
+        }
+        
+        # Remove duplicates
+        $notFoundPackages = $notFoundPackages | Select-Object -Unique
+        
+        if ($notFoundPackages.Count -gt 0) {
+            Write-Host "Packages not found in cache:" -ForegroundColor Yellow
+            foreach ($pkgName in $notFoundPackages) {
+                # Find the package in our list
+                $pkg = $packagesToInstall | Where-Object { $_.Name -eq $pkgName }
+                if ($pkg) {
+                    $packagesToPublish += $pkg
+                    Write-Host "  $($pkg.Name)@$($pkg.Version) - needs publishing" -ForegroundColor Yellow
+                }
+            }
+        }
+        
+        # If we couldn't parse any failures but npm failed, fallback to checking all
+        if ($packagesToPublish.Count -eq 0) {
+            Write-Warning "Could not parse npm output, assuming all packages need publishing"
+            $packagesToPublish = $packagesToInstall
+        }
+    }
+} catch {
+    Write-Warning "Fast install failed: $($_.Exception.Message)"
+    # Fallback: assume all packages need publishing
+    $packagesToPublish = $packagesToInstall
+}
+
+if ($packagesToPublish.Count -eq 0) {
+    Write-Host "All packages are already available!" -ForegroundColor Green
+    Restore-PackageJsonBackup | Out-Null
+    exit 0
+} else {
+    Write-Host "$($packagesToPublish.Count) packages need to be published first." -ForegroundColor Yellow
+}
+
+Write-Host "=== PUBLISHING PACKAGES ===" -ForegroundColor Magenta
+Write-Host "Note: Each workflow will automatically handle ALL transitive dependencies"
+$stats = @{
+    Total = $packagesToPublish.Count
+    Success = 0
+    Failed = 0
+}
+
+$failedPackages = @()
+
+# Process each top-level package (workflow handles dependencies)
+foreach ($pkg in $packagesToInstall) {
+    $success = Invoke-PackagePublishWorkflow -PackageName $pkg.Name -Version $pkg.Version
+    if ($success) {
+        $stats.Success++
+        Write-Host "Successfully published $($pkg.Name)@$($pkg.Version) and all dependencies" -ForegroundColor Green
+    } else {
+        $stats.Failed++
+        $failedPackages += "$($pkg.Name)@$($pkg.Version)"
+        Write-Warning "Failed to publish $($pkg.Name)@$($pkg.Version)"
+    }
+}
+
+Write-Host "=== PUBLISHING COMPLETE ===" -ForegroundColor Magenta
+Write-Host "Total packages: $($stats.Total)" -ForegroundColor Cyan
+Write-Host "Successful: $($stats.Success)" -ForegroundColor Green
+Write-Host "Failed: $($stats.Failed)" -ForegroundColor Red
+
+if ($failedPackages.Count -gt 0) {
+    Write-Host "Failed packages:" -ForegroundColor Red
+    $failedPackages | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+}
+
+# Install all packages
+Write-Host "=== INSTALLING PACKAGES ===" -ForegroundColor Magenta
+Write-Host "Waiting 10 seconds for package availability..." -ForegroundColor Yellow
+Start-Sleep -Seconds 10
+
+$installStats = @{
+    Success = 0
+    Failed = 0
+}
+
+foreach ($pkg in $packagesToPublish) {
+    if ($failedPackages -contains "$($pkg.Name)@$($pkg.Version)") {
+        $installStats.Failed++
+        continue
+    }
+    $res = Install-FromGitHubRegistry -PackageName $pkg.Name -Version $pkg.Version
+    if ($res) {
+        $installStats.Success++
+    } else {
+        $installStats.Failed++
+    }
+}
+
+Write-Host "=== INSTALLATION SUMMARY ===" -ForegroundColor Magenta
+Write-Host "Packages installed: $($installStats.Success)/$($packagesToInstall.Count)" -ForegroundColor Green
+
+if ($stats.Failed -gt 0 -or $installStats.Failed -gt 0) {
+    Write-Host "Some packages failed. Check the workflow logs at:" -ForegroundColor Yellow
+    Write-Host "  https://github.com/$GithubUsername/$GithubRepo/actions" -ForegroundColor Cyan
+} else {
+    Write-Host "All packages processed and installed successfully!" -ForegroundColor Green
+    Write-Host "=== CONVERTING PACKAGE.JSON TO ALIAS FORMAT ===" -ForegroundColor Magenta
+    Restore-PackageJsonBackup | Out-Null
+    Convert-PackageSymlinks | Out-Null 
+}
+
+#endregion
